@@ -24,7 +24,7 @@ constexpr uint8_t PIN_CC_MISO = 19;
 constexpr uint8_t PIN_CC_MOSI = 23;
 constexpr uint8_t CC_IOCFG2 = 0x00;
 constexpr uint16_t MAX_PULSES = 600;
-constexpr uint8_t MAX_SIGNALS = 20;
+constexpr uint8_t MAX_SIGNALS = 48;
 constexpr uint8_t MAX_LOG_ENTRIES = 30;
 constexpr uint8_t MAX_CAPTURE_HISTORY = 2;
 constexpr uint32_t MQTT_BUFFER_SIZE = 768;
@@ -540,14 +540,13 @@ String renderSignalList() {
 }
 
 void handleSignalsExport() {
-  String json;
-  size_t pulseCount = 0;
-  for (const StoredSignal& signal : signals) pulseCount += signal.count;
-  json.reserve(48 + signals.size() * 96 + pulseCount * 7);
-  json = "{\"format\":\"cc1101-signals\",\"version\":1,\"signals\":[";
+  webServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  webServer.sendHeader("Content-Disposition", "attachment; filename=cc1101-signals.json");
+  webServer.send(200, "application/json; charset=utf-8",
+                 "{\"format\":\"cc1101-signals\",\"version\":1,\"signals\":[");
   bool first = true;
   for (const StoredSignal& signal : signals) {
-    if (!first) json += ',';
+    if (!first) webServer.sendContent(",");
     first = false;
     JsonDocument document;
     document["id"] = signal.id;
@@ -561,11 +560,10 @@ void handleSignalsExport() {
     }
     String signalJson;
     serializeJson(document, signalJson);
-    json += signalJson;
+    webServer.sendContent(signalJson);
   }
-  json += "]}";
-  webServer.sendHeader("Content-Disposition", "attachment; filename=cc1101-signals.json");
-  webServer.send(200, "application/json; charset=utf-8", json);
+  webServer.sendContent("]}");
+  webServer.sendContent("");
 }
 
 String renderSignalEditor(const String& id) {

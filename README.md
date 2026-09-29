@@ -34,7 +34,7 @@ On first start without saved Wi-Fi settings, the bridge creates the `CC1101-Setu
 3. Give the capture a name and save it. The web page shows the pulse count and lets you inspect or edit the pulse sequence.
 4. Use **Send** to replay a recording. Saved recordings remain in NVS after reboot.
 
-The bridge supports up to 20 recordings and up to 600 pulses per recording. Recordings are raw radio data, not decoded commands; results depend on the original protocol, receiver, antenna, and radio conditions.
+The bridge supports up to 48 recordings and up to 600 pulses per recording. Recordings are raw radio data, not decoded commands; results depend on the original protocol, receiver, antenna, and radio conditions.
 
 ## MQTT and Home Assistant
 
