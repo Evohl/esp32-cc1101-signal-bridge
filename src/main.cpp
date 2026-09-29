@@ -482,6 +482,8 @@ String pageStart(const String& title) {
     ".form-grid label{display:flex;flex-direction:column;gap:5px;color:#a7b5bc;font-size:.92em}"
     ".form-grid input{width:100%;margin:0;background:#18242c;color:#e8eff2;border:1px solid #52616b;border-radius:4px}"
     ".form-actions{padding-top:14px}"
+    ".file-picker{display:flex;align-items:center;gap:8px;flex-wrap:wrap}"
+    ".file-picker span{color:#a7b5bc;overflow-wrap:anywhere}"
     ".recorder{max-width:760px}.recorder-step{padding:12px 0;border-bottom:1px solid #394952}"
     ".recorder-step h3{font-size:1em;margin:0 0 10px;color:#71d6c5}.capture-state{padding:10px 12px;margin-top:10px;"
     "background:#18242c;border-left:3px solid #71d6c5;min-height:22px}.capture-state.warn{border-color:#e6ae61}"
@@ -696,7 +698,9 @@ void handleRoot() {
     "<button id='save-button' disabled>Save signal</button></form></div></section>" +
     "<section class='panel'><h2>Back up / transfer signals</h2><div class='row'>"
     "<a class='button-link' href='/signals/export' download>Export JSON</a>"
-    "<label>Import JSON file <input id='signal-import-file' type='file' accept='.json,application/json'></label>"
+    "<div class='file-picker'><button id='signal-file-select' type='button' aria-controls='signal-import-file'>Choose file</button>"
+    "<span id='signal-import-file-name' aria-live='polite'>No file selected</span>"
+    "<input id='signal-import-file' type='file' accept='.json,application/json' hidden></div>"
     "<button id='signal-import-button' type='button'>Import</button></div>"
     "<p id='signal-import-state' class='muted' aria-live='polite'></p></section>" + renderSignalList() +
     "<section class='panel'><h2>Recent events</h2><p id='device-stats' class='muted'></p>"
@@ -741,8 +745,12 @@ void handleRoot() {
     "const gainStepsDb=[0,2.6,6.1,7.4,9.2,11.5,14.6,17.1];"
     "const updateStrengthLabel=()=>{const value=Number(strengthInput.value);document.getElementById('strength-value').value='Level '+value+' (~'+gainStepsDb[value]+' dB)';};"
     "strengthInput.addEventListener('input',updateStrengthLabel);updateStrengthLabel();"
+    "const signalFileInput=document.getElementById('signal-import-file');"
+    "document.getElementById('signal-file-select').addEventListener('click',()=>signalFileInput.click());"
+    "signalFileInput.addEventListener('change',()=>{document.getElementById('signal-import-file-name').textContent="
+    "signalFileInput.files.length?signalFileInput.files[0].name:'No file selected';});"
     "document.getElementById('signal-import-button').addEventListener('click',async()=>{"
-    "const input=document.getElementById('signal-import-file');const state=document.getElementById('signal-import-state');"
+    "const input=signalFileInput;const state=document.getElementById('signal-import-state');"
     "if(!input.files.length){state.textContent='Select a JSON file first';return;}"
     "const button=document.getElementById('signal-import-button');button.disabled=true;"
     "try{const backup=JSON.parse(await input.files[0].text());"
@@ -1078,8 +1086,19 @@ void handleSettingsPage() {
 }
 
 void handleFirmwarePage() {
-  const String body = String("<h1>Firmware aktualisieren</h1><form method='post' action='/firmware' enctype='multipart/form-data'>") +
-    "<input type='file' name='firmware' accept='.bin' required><button>Install firmware</button></form>";
+  const String body = String("<h1>Firmware update</h1><form id='firmware-form' method='post' action='/firmware' enctype='multipart/form-data'>") +
+    "<div class='file-picker'><button id='firmware-file-select' type='button' aria-controls='firmware-file'>Choose firmware file</button>"
+    "<span id='firmware-file-name' aria-live='polite'>No file selected</span>"
+    "<input id='firmware-file' type='file' name='firmware' accept='.bin' hidden></div>"
+    "<p id='firmware-state' class='muted' aria-live='polite'></p><button id='firmware-install'>Install firmware</button></form>"
+    "<script>const firmwareFile=document.getElementById('firmware-file');"
+    "document.getElementById('firmware-file-select').addEventListener('click',()=>firmwareFile.click());"
+    "firmwareFile.addEventListener('change',()=>{document.getElementById('firmware-file-name').textContent="
+    "firmwareFile.files.length?firmwareFile.files[0].name:'No file selected';});"
+    "document.getElementById('firmware-form').addEventListener('submit',event=>{"
+    "if(!firmwareFile.files.length){event.preventDefault();document.getElementById('firmware-state').textContent='Choose a firmware file first.';return;}"
+    "document.getElementById('firmware-state').textContent='Uploading firmware...';"
+    "document.getElementById('firmware-install').disabled=true;});</script>";
   webServer.send(200, "text/html; charset=utf-8", pageStart("Firmware") + body + pageEnd());
 }
 
