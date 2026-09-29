@@ -8,6 +8,7 @@
 #include <Update.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <esp_mac.h>
 #include <vector>
 
 #ifndef DEVICE_HOSTNAME_SUFFIX
@@ -1240,8 +1241,16 @@ void setup() {
 #if DEVICE_HOSTNAME_SUFFIX > 0
   snprintf(bridgeId, sizeof(bridgeId), "%06d", DEVICE_HOSTNAME_SUFFIX);
 #else
-  const uint32_t macSuffix = static_cast<uint32_t>(ESP.getEfuseMac() & 0xFFFFFF);
-  snprintf(bridgeId, sizeof(bridgeId), "%06x", macSuffix);
+  uint8_t stationMac[6]{};
+  if (esp_read_mac(stationMac, ESP_MAC_WIFI_STA) == ESP_OK) {
+    snprintf(bridgeId, sizeof(bridgeId), "%02x%02x%02x", stationMac[3], stationMac[4], stationMac[5]);
+  } else {
+    const uint64_t efuseMac = ESP.getEfuseMac();
+    const uint32_t macSuffix = (((efuseMac >> 24) & 0xFF) << 16) |
+                               (((efuseMac >> 32) & 0xFF) << 8) |
+                               ((efuseMac >> 40) & 0xFF);
+    snprintf(bridgeId, sizeof(bridgeId), "%06x", macSuffix);
+  }
 #endif
   snprintf(hostname, sizeof(hostname), "cc1101-%s", bridgeId);
   logEvent("Bridge gestartet: " + String(hostname));
