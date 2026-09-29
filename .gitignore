@@ -1,0 +1,14 @@
+.pio/
+.vscode/.browse.c_cpp.db*
+.vscode/ipch/
+*.elf
+*.bin
+.DS_Store
+Thumbs.db
+.env
+.env.*
+!.env.example
+secrets.yaml
+secrets.yml
+credentials.h
+config.local.h
