@@ -25,7 +25,7 @@ Install PlatformIO, connect the ESP32 over USB, then build and flash:
 pio run -e cc1101 -t upload
 ```
 
-On first start without saved Wi-Fi settings, the bridge creates the `CC1101-Setup` access point. Connect using its documented setup password, then open `http://192.168.4.1/` and enter the Wi-Fi settings. MQTT settings are optional. After the bridge joins Wi-Fi, open `http://esp32-<MAC-suffix>.local/` or use its DHCP address. The hostname suffix is derived from the ESP32 MAC address.
+On first start without saved Wi-Fi settings, the bridge creates the `CC1101-Setup` access point. Connect using its documented setup password, then open `http://192.168.4.1/` and enter the Wi-Fi settings. MQTT settings are optional. After the bridge joins Wi-Fi, open `http://cc1101-<mac-suffix>.local/` or use its DHCP address. The lowercase hostname suffix is derived from the ESP32 MAC address.
 
 ## Recording and replay
 
@@ -38,13 +38,13 @@ The bridge supports up to 20 recordings and up to 600 pulses per recording. Reco
 
 ## MQTT and Home Assistant
 
-Configure an MQTT broker in the web interface to enable MQTT. The default base topic is `homeassistant/cc1101`. Each saved recording is announced through Home Assistant MQTT Discovery as a button. Its command topic is:
+Configure an MQTT broker in the web interface to enable MQTT. Each bridge gets a stable six-character ID from its MAC address. Its default command base is `cc1101/<bridge-id>`; Home Assistant MQTT Discovery continues to use the standard `homeassistant` discovery prefix. Each saved recording is announced as a button. Its command topic is:
 
 ```text
-homeassistant/cc1101/signal/<id>/set
+cc1101/<bridge-id>/signal/<id>/set
 ```
 
-Send the payload `PRESS` to replay the recording. The bridge publishes availability at `homeassistant/cc1101/status`. Signal IDs are generated from their names and may receive a suffix to avoid collisions; use the ID shown on the signal page when building automations.
+Send the payload `PRESS` to replay the recording. The bridge publishes availability at `cc1101/<bridge-id>/status`. Signal IDs are generated from their names and may receive a suffix to avoid collisions; use the ID shown on the signal page when building automations.
 
 ### Example: Windcalm fan remote
 
@@ -53,7 +53,7 @@ In one installation, the six separately recorded fan-speed commands have IDs `wi
 ```yaml
 action: mqtt.publish
 data:
-	topic: homeassistant/cc1101/signal/windcalm__4/set
+	topic: cc1101/<bridge-id>/signal/windcalm__4/set
 	payload: PRESS
 ```
 
@@ -68,7 +68,7 @@ On the signal page, choose **JSON-Datei exportieren** to download `cc1101-signal
 For USB uploads, use the `cc1101` environment. For ArduinoOTA, use the target's hostname or IP:
 
 ```sh
-pio run -e cc1101_ota -t upload --upload-port esp32-<MAC-suffix>.local
+pio run -e cc1101_ota -t upload --upload-port cc1101-<mac-suffix>.local
 ```
 
 The web interface also provides a firmware upload page at `/firmware` for a PlatformIO application `.bin` file.

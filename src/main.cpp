@@ -31,6 +31,7 @@ constexpr uint32_t MQTT_BUFFER_SIZE = 768;
 constexpr uint32_t CAPTURE_CARRIER_HOLD_US = 20000;
 constexpr uint8_t DEFAULT_LNA_GAIN_REDUCTION_STEP = 3;
 char hostname[16];
+char bridgeId[7];
 constexpr char AP_NAME[] = "CC1101-Setup";
 constexpr char MQTT_DISCOVERY_PREFIX[] = "homeassistant";
 
@@ -101,7 +102,7 @@ String wifiPassword;
 String mqttHost;
 String mqttUser;
 String mqttPassword;
-String mqttBase = "homeassistant/cc1101";
+String mqttBase;
 uint16_t mqttPort = 1883;
 bool webStarted = false;
 bool otaStarted = false;
@@ -387,11 +388,24 @@ void loadSignals() {
   }
 }
 
+String discoveryObjectId(const String& signalId) {
+  return String("cc1101_") + bridgeId + "_" + signalId;
+}
+
+String discoveryConfigTopic(const String& objectId) {
+  return String(MQTT_DISCOVERY_PREFIX) + "/button/" + objectId + "/config";
+}
+
+String legacyDiscoveryConfigTopic(const String& signalId) {
+  return String(MQTT_DISCOVERY_PREFIX) + "/button/cc1101_" + signalId + "/config";
+}
+
 void publishDiscovery(const StoredSignal& signal) {
   if (!mqttClient.connected()) return;
-  const String objectId = String("cc1101_") + signal.id;
-  const String discoveryTopic = String(MQTT_DISCOVERY_PREFIX) + "/button/" + objectId + "/config";
+  const String objectId = discoveryObjectId(signal.id);
+  const String discoveryTopic = discoveryConfigTopic(objectId);
   const String commandTopic = mqttBase + "/signal/" + signal.id + "/set";
+  const String legacyTopic = legacyDiscoveryConfigTopic(signal.id);
   char payload[MQTT_BUFFER_SIZE];
   JsonDocument document;
   document["name"] = signal.label;
@@ -404,12 +418,15 @@ void publishDiscovery(const StoredSignal& signal) {
   document["payload_not_available"] = "offline";
   JsonObject device = document["device"].to<JsonObject>();
   JsonArray identifiers = device["identifiers"].to<JsonArray>();
-  identifiers.add("cc1101_bridge");
-  device["name"] = "CC1101 Signal Bridge";
+  identifiers.add(String("cc1101_bridge_") + bridgeId);
+  device["name"] = String("CC1101 Bridge ") + bridgeId;
   device["manufacturer"] = "ESP32 / CC1101";
   device["model"] = "OOK signal bridge";
   const size_t length = serializeJson(document, payload, sizeof(payload));
-  if (length > 0) mqttClient.publish(discoveryTopic.c_str(), payload, true);
+  if (length > 0) {
+    mqttClient.publish(legacyTopic.c_str(), "", true);
+    mqttClient.publish(discoveryTopic.c_str(), payload, true);
+  }
 }
 
 void publishAllDiscovery() {
@@ -1035,8 +1052,10 @@ void handleDelete() {
   for (size_t index = 0; index < signals.size(); index++) {
     if (id != signals[index].id) continue;
     if (mqttClient.connected()) {
-      const String discoveryTopic = String(MQTT_DISCOVERY_PREFIX) + "/button/cc1101_" + id + "/config";
+      const String discoveryTopic = discoveryConfigTopic(discoveryObjectId(id));
+      const String legacyTopic = legacyDiscoveryConfigTopic(id);
       mqttClient.publish(discoveryTopic.c_str(), "", true);
+      mqttClient.publish(legacyTopic.c_str(), "", true);
     }
     preferences.remove(signalKey(id).c_str());
     signals.erase(signals.begin() + index);
@@ -1219,11 +1238,12 @@ void connectWifi() {
 void setup() {
   Serial.begin(115200);
 #if DEVICE_HOSTNAME_SUFFIX > 0
-  snprintf(hostname, sizeof(hostname), "esp32-%06d", DEVICE_HOSTNAME_SUFFIX);
+  snprintf(bridgeId, sizeof(bridgeId), "%06d", DEVICE_HOSTNAME_SUFFIX);
 #else
   const uint32_t macSuffix = static_cast<uint32_t>(ESP.getEfuseMac() & 0xFFFFFF);
-  snprintf(hostname, sizeof(hostname), "esp32-%06X", macSuffix);
+  snprintf(bridgeId, sizeof(bridgeId), "%06x", macSuffix);
 #endif
+  snprintf(hostname, sizeof(hostname), "cc1101-%s", bridgeId);
   logEvent("Bridge gestartet: " + String(hostname));
   pinMode(PIN_CC_CS, OUTPUT);
   digitalWrite(PIN_CC_CS, HIGH);
@@ -1238,7 +1258,7 @@ void setup() {
   mqttPort = preferences.getUShort("mport", 1883);
   mqttUser = preferences.getString("muser", "");
   mqttPassword = preferences.getString("mpass", "");
-  mqttBase = preferences.getString("mbase", "homeassistant/cc1101");
+  mqttBase = preferences.getString("mbase", String("cc1101/") + bridgeId);
   loadSignals();
 
   ccStrobe(CC_SRES);
