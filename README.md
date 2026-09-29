@@ -44,7 +44,7 @@ Configure an MQTT broker in the web interface to enable MQTT. Each bridge gets a
 cc1101/<bridge-id>/signal/<id>/set
 ```
 
-Send the payload `PRESS` to replay the recording. The bridge publishes availability at `cc1101/<bridge-id>/status`. Signal IDs are generated from their names and may receive a suffix to avoid collisions; use the ID shown on the signal page when building automations.
+Send the payload `PRESS` to replay the recording. The bridge publishes availability at `cc1101/<bridge-id>/status`. For new recordings, enter a unique signal ID as the name: 1-11 lowercase letters or digits, with underscores allowed between characters. The name is used unchanged as the ID and MQTT topic segment; spaces and duplicate IDs are rejected.
 
 ### Example: Windcalm fan remote
 
@@ -57,11 +57,11 @@ data:
 	payload: PRESS
 ```
 
-The remaining speeds use their corresponding IDs. These IDs are specific to that installation; record and check the IDs shown by your own bridge rather than assuming they will be identical.
+The remaining speeds use their corresponding IDs. These IDs are specific to that installation; choose the desired ID when recording a signal on your bridge rather than assuming IDs will be identical.
 
 ## Backup and transfer
 
-On the signal page, choose **JSON-Datei exportieren** to download `cc1101-signals.json`. On another bridge running compatible firmware, select the file under **JSON-Datei importieren**. An imported signal with an existing ID updates that entry; other recordings are preserved. The backup contains signal metadata and pulse data, not Wi-Fi or MQTT credentials.
+On the signal page, choose **Export JSON** to download `cc1101-signals.json`. On another bridge running compatible firmware, select the file under **Import JSON file**. An imported signal with an existing ID updates that entry; other recordings are preserved. The backup contains signal metadata and pulse data, not Wi-Fi or MQTT credentials.
 
 ## Firmware updates
 

@@ -23,7 +23,6 @@ constexpr uint8_t PIN_CC_SCK = 18;
 constexpr uint8_t PIN_CC_MISO = 19;
 constexpr uint8_t PIN_CC_MOSI = 23;
 constexpr uint8_t CC_IOCFG2 = 0x00;
-constexpr float TEST_SIGNAL_FREQUENCY_MHZ = 433.92f;
 constexpr uint16_t MAX_PULSES = 600;
 constexpr uint8_t MAX_SIGNALS = 20;
 constexpr uint8_t MAX_LOG_ENTRIES = 30;
@@ -110,7 +109,7 @@ bool otaStarted = false;
 uint32_t lastMqttAttempt = 0;
 int lastMqttFailureState = -1;
 float activeFrequencyMHz = 433.92f;
-String lastAction = "Bereit";
+String lastAction = "Ready";
 bool cc1101Detected = false;
 uint8_t cc1101PartNumber = 0xFF;
 uint8_t cc1101Version = 0xFF;
@@ -289,51 +288,16 @@ String htmlEscape(const String& value) {
   return escaped;
 }
 
-String slugify(const String& value) {
-  String result;
-  result.reserve(11);
-  for (size_t index = 0; index < value.length() && result.length() < 11; index++) {
-    const char ch = value[index];
-    if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) {
-      result += ch;
-    } else if (ch >= 'A' && ch <= 'Z') {
-      result += (char)(ch - 'A' + 'a');
-    } else if (result.length() > 0 && result[result.length() - 1] != '_') {
-      result += '_';
-    }
+bool validSignalId(const String& id) {
+  if (id.isEmpty() || id.length() > 11 ||
+      !((id[0] >= 'a' && id[0] <= 'z') || (id[0] >= '0' && id[0] <= '9')) ||
+      !((id[id.length() - 1] >= 'a' && id[id.length() - 1] <= 'z') ||
+        (id[id.length() - 1] >= '0' && id[id.length() - 1] <= '9'))) return false;
+  for (size_t index = 0; index < id.length(); index++) {
+    const char ch = id[index];
+    if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_')) return false;
   }
-  while (result.endsWith("_")) result.remove(result.length() - 1);
-  if (result.isEmpty()) result = "signal";
-  return result;
-}
-
-String uniqueSignalId(const String& label) {
-  const String base = slugify(label);
-  bool baseInUse = false;
-  for (const StoredSignal& signal : signals) {
-    if (base == signal.id) {
-      baseInUse = true;
-      break;
-    }
-  }
-  if (!baseInUse) return base;
-
-  for (uint8_t suffixNumber = 2; suffixNumber < 100; suffixNumber++) {
-    const String suffix = "_" + String(suffixNumber);
-    String candidate = base;
-    const size_t maxBaseLength = 11 - suffix.length();
-    if (candidate.length() > maxBaseLength) candidate.remove(maxBaseLength);
-    candidate += suffix;
-    bool candidateInUse = false;
-    for (const StoredSignal& signal : signals) {
-      if (candidate == signal.id) {
-        candidateInUse = true;
-        break;
-      }
-    }
-    if (!candidateInUse) return candidate;
-  }
-  return "";
+  return true;
 }
 
 bool sameSignal(const StoredSignal& first, const StoredSignal& second) {
@@ -449,38 +413,11 @@ void sendSignal(const String& id) {
     ccStrobe(CC_SIDLE);
     pinMode(PIN_CC_GDO0, INPUT);
     ccStrobe(CC_SRX);
-    lastAction = "Gesendet: " + String(signal.label);
-    logEvent("Gesendet: " + String(signal.label));
+    lastAction = "Sent: " + String(signal.label);
+    logEvent("Sent: " + String(signal.label));
     return;
   }
-  lastAction = "Signal nicht gefunden: " + id;
-  logEvent(lastAction);
-}
-
-void sendTestSignal() {
-  if (!cc1101Detected || captureActive) {
-    lastAction = captureActive ? "Testsignal abgelehnt: Aufnahme laeuft" : "Testsignal abgelehnt: CC1101 nicht erkannt";
-    logEvent(lastAction);
-    return;
-  }
-
-  ccConfigure(TEST_SIGNAL_FREQUENCY_MHZ, false);
-  pinMode(PIN_CC_GDO0, OUTPUT);
-  digitalWrite(PIN_CC_GDO0, LOW);
-  ccStrobe(CC_STX);
-  for (uint8_t burstIndex = 0; burstIndex < 12; burstIndex++) {
-    for (uint8_t pulseIndex = 0; pulseIndex < 12; pulseIndex++) {
-      digitalWrite(PIN_CC_GDO0, HIGH);
-      delayMicroseconds(800);
-      digitalWrite(PIN_CC_GDO0, LOW);
-      delayMicroseconds(800);
-    }
-    delayMicroseconds(8000);
-  }
-  ccStrobe(CC_SIDLE);
-  pinMode(PIN_CC_GDO0, INPUT);
-  ccConfigure(TEST_SIGNAL_FREQUENCY_MHZ, true);
-  lastAction = "Testsignal gesendet auf 433.92 MHz";
+  lastAction = "Signal not found: " + id;
   logEvent(lastAction);
 }
 
@@ -515,32 +452,34 @@ void reconnectMqtt() {
     mqttClient.publish(availabilityTopic.c_str(), "online", true);
     mqttClient.subscribe((mqttBase + "/signal/+/set").c_str());
     publishAllDiscovery();
-    lastAction = "MQTT verbunden";
-    logEvent("MQTT verbunden");
+    lastAction = "MQTT connected";
+    logEvent("MQTT connected");
     lastMqttFailureState = -1;
   } else {
     const int state = mqttClient.state();
     if (state != lastMqttFailureState) {
-      logEvent("MQTT-Verbindung fehlgeschlagen (rc " + String(state) + ")");
+      logEvent("MQTT connection failed (rc " + String(state) + ")");
       lastMqttFailureState = state;
     }
   }
 }
 
 String pageStart(const String& title) {
-  return String("<!doctype html><html lang='de'><meta charset='utf-8'>") +
+  return String("<!doctype html><html lang='en'><meta charset='utf-8'>") +
     "<meta name='viewport' content='width=device-width,initial-scale=1'><title>" + htmlEscape(title) +
     " · CC1101</title><style>body{font:16px system-ui,sans-serif;max-width:900px;margin:0 auto;padding:18px;"
     "background:#101820;color:#e8eff2}nav{display:flex;gap:16px;padding:12px 0;border-bottom:1px solid #52616b}"
     "a{color:#71d6c5}main{padding-top:16px}.panel{padding:14px 0;border-bottom:1px solid #394952}"
-    "input,button{font:inherit;padding:9px;margin:4px 4px 4px 0}input{max-width:100%;box-sizing:border-box}"
-    "button{background:#71d6c5;border:0;color:#102126;cursor:pointer}small,.muted{color:#a7b5bc}"
+    "input{font:inherit;padding:9px;margin:4px 4px 4px 0;max-width:100%;box-sizing:border-box}"
+    "button,.button-link{display:inline-block;font:inherit;padding:9px 14px;margin:4px 4px 4px 0;border:0;"
+    "border-radius:4px;background:#71d6c5;color:#102126;text-decoration:none;cursor:pointer}"
+    "button:hover,.button-link:hover{background:#8be3d4}small,.muted{color:#a7b5bc}"
     "form{margin:8px 0}.row{display:flex;gap:8px;flex-wrap:wrap}.row label{display:block}"
     ".setup-form{max-width:680px}.setup-section{padding:14px 0;border-bottom:1px solid #394952}"
     ".setup-section h2{font-size:1.1em;margin:0 0 12px}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:12px 16px}"
     ".form-grid label{display:flex;flex-direction:column;gap:5px;color:#a7b5bc;font-size:.92em}"
     ".form-grid input{width:100%;margin:0;background:#18242c;color:#e8eff2;border:1px solid #52616b;border-radius:4px}"
-    ".form-actions{padding-top:14px}.form-actions button{padding:10px 18px;border-radius:4px}"
+    ".form-actions{padding-top:14px}"
     ".recorder{max-width:760px}.recorder-step{padding:12px 0;border-bottom:1px solid #394952}"
     ".recorder-step h3{font-size:1em;margin:0 0 10px;color:#71d6c5}.capture-state{padding:10px 12px;margin-top:10px;"
     "background:#18242c;border-left:3px solid #71d6c5;min-height:22px}.capture-state.warn{border-color:#e6ae61}"
@@ -549,8 +488,8 @@ String pageStart(const String& title) {
     ".log-list{max-height:360px;overflow:auto;background:#101820;border:1px solid #394952;padding:8px 12px;font:13px ui-monospace,monospace}"
     ".log-entry{padding:4px 0;border-bottom:1px solid #26343c;overflow-wrap:anywhere}.log-entry:last-child{border:0}"
     "button:disabled{opacity:.45;cursor:not-allowed}"
-    "code{overflow-wrap:anywhere}</style><nav><b>CC1101 Bridge</b><a href='/'>Signale</a>"
-    "<a href='/settings'>Netzwerk</a><a href='/firmware'>Firmware</a><a href='/restart'>Neustart</a></nav><main>";
+    "code{overflow-wrap:anywhere}</style><nav><b>CC1101 Bridge</b><a href='/'>Signals</a>"
+    "<a href='/settings'>Network</a><a href='/firmware'>Firmware</a><a href='/restart'>Restart</a></nav><main>";
 }
 
 String pageEnd() {
@@ -559,40 +498,39 @@ String pageEnd() {
 
 String settingsForm(bool firstSetup) {
   const String intro = firstSetup
-    ? "<h1>WLAN einrichten</h1><p>Mit dem Access Point <b>" + String(AP_NAME) +
-      "</b> (Passwort: <code>cc1101setup</code>) verbinden. MQTT kann spaeter eingerichtet werden.</p>"
-    : "<h1>Netzwerk / MQTT</h1>";
+    ? "<h1>Set up Wi-Fi</h1><p>Connect to the <b>" + String(AP_NAME) +
+      "</b> access point (password: <code>cc1101setup</code>). MQTT can be configured later.</p>"
+    : "<h1>Network / MQTT</h1>";
   const String wifiName = firstSetup ? "" : htmlEscape(wifiSsid);
-  const String wifiPasswordHint = firstSetup ? "" : " placeholder='leer = unveraendert'";
-  const String mqttPasswordHint = firstSetup ? "" : " placeholder='leer = unveraendert'";
+  const String wifiPasswordHint = firstSetup ? "" : " placeholder='blank = unchanged'";
+  const String mqttPasswordHint = firstSetup ? "" : " placeholder='blank = unchanged'";
   return intro +
     "<form class='setup-form' method='post' action='/settings'>"
-    "<section class='setup-section'><h2>WLAN</h2><div class='form-grid'>"
-    "<label>WLAN-Name<input name='ssid' value='" + wifiName + "' required autocomplete='off'></label>"
-    "<label>WLAN-Passwort<input type='password' name='wifi_password'" + wifiPasswordHint + " autocomplete='new-password'></label>"
+    "<section class='setup-section'><h2>Wi-Fi</h2><div class='form-grid'>"
+    "<label>Network name<input name='ssid' value='" + wifiName + "' required autocomplete='off'></label>"
+    "<label>Wi-Fi password<input type='password' name='wifi_password'" + wifiPasswordHint + " autocomplete='new-password'></label>"
     "</div></section><section class='setup-section'><h2>MQTT</h2><div class='form-grid'>"
-    "<label>Broker-Adresse<input name='mqtt_host' value='" + htmlEscape(mqttHost) + "' placeholder='z. B. 192.168.1.10'></label>"
+    "<label>Broker address<input name='mqtt_host' value='" + htmlEscape(mqttHost) + "' placeholder='e.g. 192.168.1.10'></label>"
     "<label>Port<input type='number' name='mqtt_port' min='1' max='65535' value='" + String(mqttPort) + "'></label>"
-    "<label>Benutzername<input name='mqtt_user' value='" + htmlEscape(mqttUser) + "' autocomplete='off'></label>"
-    "<label>MQTT-Passwort<input type='password' name='mqtt_password'" + mqttPasswordHint + " autocomplete='new-password'></label>"
+    "<label>Username<input name='mqtt_user' value='" + htmlEscape(mqttUser) + "' autocomplete='off'></label>"
+    "<label>MQTT password<input type='password' name='mqtt_password'" + mqttPasswordHint + " autocomplete='new-password'></label>"
     "</div></section><div class='form-actions'><button>" +
-    String(firstSetup ? "Speichern und verbinden" : "Speichern und neu starten") +
+    String(firstSetup ? "Save and connect" : "Save and restart") +
     "</button></div></form>" +
-    (firstSetup ? "" : "<p class='muted'>Leere Passwortfelder behalten das gespeicherte Passwort.</p>");
+    (firstSetup ? "" : "<p class='muted'>Leave password fields blank to keep the saved passwords.</p>");
 }
 
 String renderSignalList() {
   String body;
-  if (signals.empty()) body += "<p class='muted'>Noch keine Signale gespeichert.</p>";
+  if (signals.empty()) body += "<p class='muted'>No signals saved yet.</p>";
   for (const StoredSignal& signal : signals) {
     body += "<section class='panel'><h3>" + htmlEscape(signal.label) + "</h3><p class='muted'>" +
-      String(signal.frequencyMHz, 2) + " MHz · " + String(signal.count) + " Pulse · ID <code>" +
-      htmlEscape(signal.id) + "</code></p><div class='row'><form method='get' action='/signal'>" +
-      "<input type='hidden' name='id' value='" + htmlEscape(signal.id) + "'><button>Daten</button></form>"
+      String(signal.frequencyMHz, 2) + " MHz · " + String(signal.count) + " pulses</p><div class='row'><form method='get' action='/signal'>" +
+      "<input type='hidden' name='id' value='" + htmlEscape(signal.id) + "'><button>Edit</button></form>"
       "<form method='post' action='/send'>" +
-      "<input type='hidden' name='id' value='" + htmlEscape(signal.id) + "'><button>Senden</button></form>" +
-      "<form method='post' action='/delete' onsubmit=\"return confirm('Signal loeschen?')\">" +
-      "<input type='hidden' name='id' value='" + htmlEscape(signal.id) + "'><button>Loeschen</button></form></div></section>";
+      "<input type='hidden' name='id' value='" + htmlEscape(signal.id) + "'><button>Send</button></form>" +
+      "<form method='post' action='/delete' onsubmit=\"return confirm('Delete signal?')\">" +
+      "<input type='hidden' name='id' value='" + htmlEscape(signal.id) + "'><button>Delete</button></form></div></section>";
   }
   return body;
 }
@@ -638,29 +576,29 @@ String renderSignalEditor(const String& id) {
       pulseData += '\n';
     }
 
-    String body = "<h1>Daten bearbeiten</h1><p class='muted'>" + String(signal.count) +
-      " Pulse · Pegel und Dauer in Mikrosekunden, ein Eintrag pro Zeile.</p>"
+    String body = "<h1>Edit signal</h1><p class='muted'>" + String(signal.count) +
+      " pulses · Logic level and duration in microseconds, one entry per line.</p>"
       "<form method='post' action='/signal/save' class='setup-form'>"
       "<input type='hidden' name='id' value='" + htmlEscape(signal.id) + "'>"
       "<section class='setup-section'><div class='form-grid'>"
-      "<label>Name<input name='name' maxlength='32' value='" + htmlEscape(signal.label) + "' required></label>"
-      "<label>Frequenz (MHz)<input type='number' name='frequency' min='300' max='928' step='0.01' value='" +
+      "<label>Signal name<input name='name' maxlength='32' value='" + htmlEscape(signal.label) + "' required></label>"
+      "<label>Frequency (MHz)<input type='number' name='frequency' min='300' max='928' step='0.01' value='" +
       String(signal.frequencyMHz, 2) + "' required></label></div></section>"
-      "<section class='setup-section'><label>Pulsfolge (H:µs oder L:µs, pro Zeile)"
+      "<section class='setup-section'><label>Pulse sequence (H:us or L:us, one per line)"
       "<textarea name='pulse_data' rows='18' spellcheck='false' required style='display:block;width:100%;box-sizing:border-box;"
       "background:#18242c;color:#e8eff2;border:1px solid #52616b;padding:10px;font:13px ui-monospace,monospace'>" +
       htmlEscape(pulseData) + "</textarea></label></section>"
-      "<div class='form-actions'><button>Aenderungen speichern</button> <a href='/'>Abbrechen</a></div></form>";
-    return pageStart("Signal bearbeiten") + body + pageEnd();
+      "<div class='form-actions'><button>Save changes</button> <a href='/'>Cancel</a></div></form>";
+    return pageStart("Edit signal") + body + pageEnd();
   }
-  return pageStart("Signal nicht gefunden") + "<h1>Signal nicht gefunden</h1><p><a href='/'>Zurueck</a></p>" + pageEnd();
+  return pageStart("Signal not found") + "<h1>Signal not found</h1><p><a href='/'>Back</a></p>" + pageEnd();
 }
 
 void handleSignalImport() {
   JsonDocument document;
   const DeserializationError error = deserializeJson(document, webServer.arg("plain"));
   if (error) {
-    webServer.send(400, "text/plain", "JSON ungueltig");
+    webServer.send(400, "text/plain", "Invalid JSON");
     return;
   }
 
@@ -669,18 +607,11 @@ void handleSignalImport() {
   const float frequency = document["frequencyMHz"] | 0.0f;
   JsonArrayConst durations = document["durations"].as<JsonArrayConst>();
   JsonArrayConst levels = document["levels"].as<JsonArrayConst>();
-  if (id.isEmpty() || id.length() > 11 || label.isEmpty() || label.length() > 32 ||
+  if (!validSignalId(id) || label.isEmpty() || label.length() > 32 ||
       !validFrequency(frequency) || durations.size() < 4 || durations.size() > MAX_PULSES ||
       levels.size() != durations.size()) {
-    webServer.send(400, "text/plain", "Signal-Metadaten oder Pulsfolge ungueltig");
+    webServer.send(400, "text/plain", "Invalid signal metadata or pulse sequence");
     return;
-  }
-  for (size_t index = 0; index < id.length(); index++) {
-    const char ch = id[index];
-    if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_')) {
-      webServer.send(400, "text/plain", "Signal-ID ungueltig");
-      return;
-    }
   }
 
   StoredSignal imported{};
@@ -692,7 +623,7 @@ void handleSignalImport() {
     const uint32_t duration = durations[index] | 0;
     const int level = levels[index] | -1;
     if (duration < 1 || duration > 65535 || (level != LOW && level != HIGH)) {
-      webServer.send(400, "text/plain", "Pulsdauer oder Pegel ungueltig");
+      webServer.send(400, "text/plain", "Invalid pulse duration or logic level");
       return;
     }
     imported.durations[index] = (uint16_t)duration;
@@ -703,12 +634,12 @@ void handleSignalImport() {
   for (size_t index = 0; index < signals.size(); index++) {
     if (id == signals[index].id) signalIndex = index;
     else if (sameSignal(signals[index], imported)) {
-      webServer.send(409, "text/plain", "Pulsfolge bereits unter einer anderen ID gespeichert");
+      webServer.send(409, "text/plain", "This pulse sequence is already saved under another ID");
       return;
     }
   }
   if (signalIndex == signals.size() && signals.size() >= MAX_SIGNALS) {
-    webServer.send(409, "text/plain", "Maximale Anzahl gespeicherter Signale erreicht");
+    webServer.send(409, "text/plain", "Maximum number of saved signals reached");
     return;
   }
 
@@ -716,7 +647,7 @@ void handleSignalImport() {
   const StoredSignal previous = replacing ? signals[signalIndex] : StoredSignal{};
   const String key = signalKey(id);
   if (preferences.putBytes(key.c_str(), &imported, sizeof(imported)) != sizeof(imported)) {
-    webServer.send(500, "text/plain", "NVS konnte das Signal nicht speichern");
+    webServer.send(500, "text/plain", "Could not save signal to NVS");
     return;
   }
   if (replacing) signals[signalIndex] = imported;
@@ -729,11 +660,11 @@ void handleSignalImport() {
       signals.pop_back();
       preferences.remove(key.c_str());
     }
-    webServer.send(500, "text/plain", "Signalindex konnte nicht gespeichert werden");
+    webServer.send(500, "text/plain", "Could not save signal index");
     return;
   }
   publishDiscovery(imported);
-  lastAction = String(replacing ? "Importiert/aktualisiert: " : "Importiert: ") + label;
+  lastAction = String(replacing ? "Imported/updated: " : "Imported: ") + label;
   logEvent(lastAction);
   webServer.send(200, "text/plain", "OK");
 }
@@ -741,34 +672,33 @@ void handleSignalImport() {
 void handleRoot() {
   if (WiFi.status() != WL_CONNECTED) {
     const String body = settingsForm(true);
-    webServer.send(200, "text/html; charset=utf-8", pageStart("WLAN Setup") + body + pageEnd());
+    webServer.send(200, "text/html; charset=utf-8", pageStart("Wi-Fi setup") + body + pageEnd());
     return;
   }
 
-  String body = "<h1>Signalverwaltung</h1><section class='panel recorder'><h2>Recorder</h2>"
-    "<div class='recorder-step'><h3>1. Signal aufnehmen</h3>"
+  String body = "<h1>Signal manager</h1><section class='panel recorder'><h2>Signal recorder</h2>"
+    "<div class='recorder-step'><h3>1. Capture a signal</h3>"
     "<form method='post' action='/capture/start' class='form-grid' id='capture-form'>"
-    "<label>Frequenz (MHz)<input type='number' name='frequency' min='300' max='928' step='0.01' value='433.92' required></label>"
-    "<label>Dauer (Sekunden)<input type='number' name='seconds' min='1' max='10' value='3' required></label>"
-    "<label>Stoerfilter / Mindeststaerke (0-7)<input type='range' name='strength' min='0' max='7' step='1' value='" + String(captureGainReductionStep) + "'><output id='strength-value'></output></label>"
-    "<div class='form-actions'><button id='capture-button'>Aufnahme starten</button></div></form>"
-    "<div id='capture-state' class='capture-state' aria-live='polite'>Noch keine Aufnahme</div>"
-    "<div class='pulse-preview'><canvas id='pulse-waveform' class='pulse-waveform' aria-label='Zeitdiagramm der empfangenen Pulse'></canvas>"
-    "<p id='pulse-summary' class='muted'>Nach einer Aufnahme erscheint hier das Zeitdiagramm.</p>"
-    "<details><summary>Erste 120 Pulsdauern</summary><p id='pulse-values' class='pulse-values'></p></details></div></div>"
-    "<div class='recorder-step'><h3>2. Aufnahme benennen und speichern</h3>"
+    "<label>Frequency (MHz)<input type='number' name='frequency' min='300' max='928' step='0.01' value='433.92' required></label>"
+    "<label>Duration (seconds)<input type='number' name='seconds' min='1' max='10' value='3' required></label>"
+    "<label>Noise reduction (0-7)<input type='range' name='strength' min='0' max='7' step='1' value='" + String(captureGainReductionStep) + "'><output id='strength-value'></output></label>"
+    "<div class='form-actions'><button id='capture-button'>Start capture</button></div></form>"
+    "<div id='capture-state' class='capture-state' aria-live='polite'>No capture yet</div>"
+    "<div class='pulse-preview'><canvas id='pulse-waveform' class='pulse-waveform' aria-label='Captured pulse waveform'></canvas>"
+    "<p id='pulse-summary' class='muted'>The waveform will appear here after capture.</p>"
+    "<details><summary>First 120 pulse durations</summary><p id='pulse-values' class='pulse-values'></p></details></div></div>"
+    "<div class='recorder-step'><h3>2. Name and save the signal</h3>"
     "<form method='post' action='/capture/save' class='row'>"
-    "<label>Name <input name='name' maxlength='32' required></label>"
-    "<button id='save-button' disabled>Signal speichern</button></form></div>"
-    "<div class='recorder-step'><h3>3. CC1101-Funktest</h3><p class='muted'>Sendet einen kurzen OOK-Testburst auf 433.92 MHz, keinen Ventilatorbefehl. Am zweiten Empfaenger eine Aufnahme auf 433.92 MHz starten.</p>"
-    "<form method='post' action='/test-send'><button>Testsignal senden</button></form></div></section>" +
-    "<section class='panel'><h2>Signale sichern / uebertragen</h2><div class='row'>"
-    "<a href='/signals/export' download>JSON-Datei exportieren</a>"
-    "<label>JSON-Datei importieren <input id='signal-import-file' type='file' accept='.json,application/json'></label>"
-    "<button id='signal-import-button' type='button'>Importieren</button></div>"
+    "<label>Signal ID <input name='name' maxlength='11' pattern='[a-z0-9]+(_+[a-z0-9]+)*'"
+    " autocapitalize='none' spellcheck='false' title='1-11 characters: lowercase letters, digits, and underscores between characters' required></label>"
+    "<button id='save-button' disabled>Save signal</button></form></div></section>" +
+    "<section class='panel'><h2>Back up / transfer signals</h2><div class='row'>"
+    "<a class='button-link' href='/signals/export' download>Export JSON</a>"
+    "<label>Import JSON file <input id='signal-import-file' type='file' accept='.json,application/json'></label>"
+    "<button id='signal-import-button' type='button'>Import</button></div>"
     "<p id='signal-import-state' class='muted' aria-live='polite'></p></section>" + renderSignalList() +
-    "<section class='panel'><h2>Letzte Ereignisse</h2><p id='device-stats' class='muted'></p>"
-    "<div id='event-log' class='log-list' aria-live='polite'>Noch keine Ereignisse</div></section>" +
+    "<section class='panel'><h2>Recent events</h2><p id='device-stats' class='muted'></p>"
+    "<div id='event-log' class='log-list' aria-live='polite'>No events yet</div></section>" +
     "<script>let shownCaptureId=-1;async function loadPulsePreview(){try{const response=await fetch('/api/pulses',{cache:'no-store'});"
     "if(!response.ok)return;const data=await response.json();const durations=data.durations;const levels=data.levels;"
     "if(!durations.length||durations.length!==levels.length)return;const canvas=document.getElementById('pulse-waveform');"
@@ -783,47 +713,47 @@ void handleRoot() {
     "context.lineTo(x+4,highY+8);}if(i+1<levels.length)context.lineTo(x,levels[i+1]?highY:lowY);}"
     "context.strokeStyle='#71d6c5';context.lineWidth=1.5;context.stroke();"
     "const min=Math.min(...durations);const max=Math.max(...durations);document.getElementById('pulse-summary').textContent="
-    "+durations.length+' Pulse · '+data.frequency.toFixed(2)+' MHz · '+(total/1000).toFixed(1)+' ms angezeigt · Dauer '+min+'-'+max+' µs · LOW-Pausen >5 ms komprimiert';"
+    "+durations.length+' pulses · '+data.frequency.toFixed(2)+' MHz · '+(total/1000).toFixed(1)+' ms displayed · range '+min+'-'+max+' us · LOW gaps >5 ms compressed';"
     "document.getElementById('pulse-values').textContent=durations.slice(0,120).map((value,index)=>"
     "+(levels[index]?'HIGH ':'LOW ')+value+' µs').join(' · ');}catch(error){}}"
     "async function refreshStatus(){try{const response=await fetch('/api/status',{cache:'no-store'});"
     "const data=await response.json();const state=document.getElementById('capture-state');"
-    "const captureLabel=data.capture?'Aufnahme laeuft':(data.pulses?'Aufnahme bereit':'Keine Pulse empfangen');"
-    "state.textContent=captureLabel+' · '+data.pulses+' Pulse · GPIO4/GDO0 '+(data.gdo0?'HIGH':'LOW')+' · GPIO27/CS '+(data.carrier?'HIGH':'LOW');"
+    "const captureLabel=data.capture?'Capture in progress':(data.pulses?'Capture ready':'No pulses received');"
+    "state.textContent=captureLabel+' · '+data.pulses+' pulses · GPIO4/GDO0 '+(data.gdo0?'HIGH':'LOW')+' · GPIO27/CS '+(data.carrier?'HIGH':'LOW');"
     "state.classList.toggle('warn',!data.pulses&&!data.capture);const captureButton=document.getElementById('capture-button');"
-    "captureButton.disabled=data.capture;captureButton.textContent=data.capture?'Aufnahme laeuft':'Aufnahme starten';"
+    "captureButton.disabled=data.capture;captureButton.textContent=data.capture?'Capturing...':'Start capture';"
     "document.getElementById('save-button').disabled=data.capture||data.pulses<4;"
-    "document.getElementById('device-stats').textContent='RSSI '+(data.rssi_dbm===undefined?'--':data.rssi_dbm.toFixed(1)+' dBm')+' · Log '+data.log_entries+'/'+data.log_capacity+' · Signale '+data.signals;"
+    "document.getElementById('device-stats').textContent='RSSI '+(data.rssi_dbm===undefined?'--':data.rssi_dbm.toFixed(1)+' dBm')+' · Log '+data.log_entries+'/'+data.log_capacity+' · Signals '+data.signals;"
     "if(!data.capture&&data.pulses>0&&data.capture_id!==shownCaptureId){shownCaptureId=data.capture_id;loadPulsePreview();}"
-    "const log=document.getElementById('event-log');log.replaceChildren();if(!data.log.length){log.textContent='Noch keine Ereignisse';return;}"
+    "const log=document.getElementById('event-log');log.replaceChildren();if(!data.log.length){log.textContent='No events yet';return;}"
     "for(let i=data.log.length-1;i>=0;i--){const item=document.createElement('div');item.className='log-entry';"
     "item.textContent=(data.log[i].seconds.toFixed(1)+' s · '+data.log[i].message);log.append(item);}}catch(error){}}"
     "document.getElementById('capture-form').addEventListener('submit',async(event)=>{event.preventDefault();"
     "const form=event.currentTarget;const button=document.getElementById('capture-button');const state=document.getElementById('capture-state');"
-    "button.disabled=true;button.textContent='Aufnahme startet...';state.textContent='Aufnahme wird gestartet';"
+    "button.disabled=true;button.textContent='Starting capture...';state.textContent='Starting capture';"
     "try{const response=await fetch(form.action,{method:'POST',headers:{'X-Requested-With':'fetch'},"
     "body:new URLSearchParams(new FormData(form))});"
     "if(!response.ok)throw new Error(await response.text());await refreshStatus();}catch(error){button.disabled=false;"
-    "button.textContent='Aufnahme starten';state.textContent=error.message;state.classList.add('warn');}});"
+    "button.textContent='Start capture';state.textContent=error.message;state.classList.add('warn');}});"
     "const strengthInput=document.querySelector('#capture-form input[name=strength]');"
     "const gainStepsDb=[0,2.6,6.1,7.4,9.2,11.5,14.6,17.1];"
-    "const updateStrengthLabel=()=>{const value=Number(strengthInput.value);document.getElementById('strength-value').value='Stufe '+value+' (~'+gainStepsDb[value]+' dB)';};"
+    "const updateStrengthLabel=()=>{const value=Number(strengthInput.value);document.getElementById('strength-value').value='Level '+value+' (~'+gainStepsDb[value]+' dB)';};"
     "strengthInput.addEventListener('input',updateStrengthLabel);updateStrengthLabel();"
     "document.getElementById('signal-import-button').addEventListener('click',async()=>{"
     "const input=document.getElementById('signal-import-file');const state=document.getElementById('signal-import-state');"
-    "if(!input.files.length){state.textContent='Bitte zuerst eine JSON-Datei auswaehlen';return;}"
+    "if(!input.files.length){state.textContent='Select a JSON file first';return;}"
     "const button=document.getElementById('signal-import-button');button.disabled=true;"
     "try{const backup=JSON.parse(await input.files[0].text());"
     "if(backup.format!=='cc1101-signals'||backup.version!==1||!Array.isArray(backup.signals))"
-    "throw new Error('Dateiformat oder Version wird nicht unterstuetzt');"
+    "throw new Error('Unsupported file format or version');"
     "let imported=0;for(const signal of backup.signals){const response=await fetch('/signal/import',{method:'POST',"
     "headers:{'Content-Type':'application/json'},body:JSON.stringify(signal)});"
-    "if(!response.ok)throw new Error((await response.text())+' ('+imported+' von '+backup.signals.length+' importiert)');"
-    "imported++;state.textContent='Importiert: '+imported+' von '+backup.signals.length;}"
-    "state.textContent='Import abgeschlossen: '+imported+' Signale';location.reload();}"
-    "catch(error){state.textContent='Importfehler: '+error.message;}finally{button.disabled=false;}});"
+    "if(!response.ok)throw new Error((await response.text())+' ('+imported+' of '+backup.signals.length+' imported)');"
+    "imported++;state.textContent='Imported: '+imported+' of '+backup.signals.length;}"
+    "state.textContent='Import complete: '+imported+' signals';location.reload();}"
+    "catch(error){state.textContent='Import failed: '+error.message;}finally{button.disabled=false;}});"
     "refreshStatus();setInterval(refreshStatus,1000);</script>";
-  webServer.send(200, "text/html; charset=utf-8", pageStart("Signale") + body + pageEnd());
+  webServer.send(200, "text/html; charset=utf-8", pageStart("Signals") + body + pageEnd());
 }
 
 void handleCaptureStart() {
@@ -832,22 +762,22 @@ void handleCaptureStart() {
   const long secondsValue = webServer.arg("seconds").toInt();
   const long strengthValue = webServer.hasArg("strength") ? webServer.arg("strength").toInt() : DEFAULT_LNA_GAIN_REDUCTION_STEP;
   if (captureActive) {
-    logEvent("Aufnahmestart abgelehnt: Aufnahme laeuft bereits");
+    logEvent("Capture start rejected: capture already in progress");
     if (isAjax) { webServer.send(204); return; }
     webServer.sendHeader("Location", "/");
     webServer.send(303);
     return;
   }
   if (!validFrequency(frequency)) {
-    webServer.send(400, "text/plain", "Frequenz ungueltig. Erlaubte CC1101-Baender: 300-348, 387-464 oder 779-928 MHz.");
+    webServer.send(400, "text/plain", "Invalid frequency. Supported CC1101 bands: 300-348, 387-464, or 779-928 MHz.");
     return;
   }
   if (secondsValue < 1 || secondsValue > 10) {
-    webServer.send(400, "text/plain", "Aufnahmedauer muss zwischen 1 und 10 Sekunden liegen.");
+    webServer.send(400, "text/plain", "Capture duration must be between 1 and 10 seconds.");
     return;
   }
   if (strengthValue < 0 || strengthValue > 7) {
-    webServer.send(400, "text/plain", "Stoerfilter muss zwischen 0 und 7 liegen.");
+    webServer.send(400, "text/plain", "Noise reduction must be between 0 and 7.");
     return;
   }
   const uint8_t seconds = (uint8_t)secondsValue;
@@ -864,8 +794,8 @@ void handleCaptureStart() {
   captureActive = true;
   ccConfigure(frequency, true);
   attachInterrupt(digitalPinToInterrupt(PIN_CC_GDO0), captureEdge, CHANGE);
-  lastAction = "Aufnahme laeuft";
-  logEvent("Aufnahme gestartet: " + String(frequency, 2) + " MHz, " + String(seconds) + " s, Stoerfilter Stufe " + String(captureGainReductionStep));
+  lastAction = "Capture in progress";
+  logEvent("Capture started: " + String(frequency, 2) + " MHz, " + String(seconds) + " s, noise reduction level " + String(captureGainReductionStep));
   if (isAjax) { webServer.send(204); return; }
   webServer.sendHeader("Location", "/");
   webServer.send(303);
@@ -877,8 +807,8 @@ void finishCapture() {
   captureActive = false;
   ccStrobe(CC_SIDLE);
   ccStrobe(CC_SRX);
-  lastAction = "Aufnahme beendet";
-  logEvent("Aufnahme beendet: " + String(captureCount) + " Pulse, GPIO4/GDO0 " +
+  lastAction = "Capture finished";
+  logEvent("Capture finished: " + String(captureCount) + " pulses, GPIO4/GDO0 " +
            String(digitalRead(PIN_CC_GDO0) ? "HIGH" : "LOW"));
 }
 
@@ -886,18 +816,24 @@ void handleCaptureSave() {
   if (captureActive) finishCapture();
   const String label = webServer.arg("name");
   if (label.isEmpty() || captureCount < 4) {
-    logEvent("Nicht gespeichert: weniger als 4 Pulse oder Name fehlt");
-    webServer.send(400, "text/plain", "Name fehlt oder keine brauchbare Aufnahme vorhanden");
+    logEvent("Not saved: fewer than 4 pulses or missing signal ID");
+    webServer.send(400, "text/plain", "A signal ID is required and the capture must contain at least four pulses.");
     return;
   }
   if (signals.size() >= MAX_SIGNALS) {
-    webServer.send(400, "text/plain", "Maximale Anzahl gespeicherter Signale erreicht");
+    webServer.send(400, "text/plain", "Maximum number of saved signals reached.");
     return;
   }
-  const String id = uniqueSignalId(label);
-  if (id.isEmpty()) {
-    webServer.send(400, "text/plain", "Keine eindeutige Signal-ID verfuegbar");
+  if (!validSignalId(label)) {
+    webServer.send(400, "text/plain", "Invalid signal ID: use 1-11 lowercase letters or digits, with underscores only between characters.");
     return;
+  }
+  const String id = label;
+  for (const StoredSignal& existing : signals) {
+    if (id == existing.id) {
+      webServer.send(409, "text/plain", "This signal ID is already in use.");
+      return;
+    }
   }
   StoredSignal signal{};
   strlcpy(signal.id, id.c_str(), sizeof(signal.id));
@@ -913,7 +849,7 @@ void handleCaptureSave() {
 
   for (const StoredSignal& existing : signals) {
     if (!sameSignal(existing, signal)) continue;
-    lastAction = "Duplikat nicht gespeichert: " + label;
+    lastAction = "Duplicate not saved: " + label;
     logEvent(lastAction);
     webServer.sendHeader("Location", "/");
     webServer.send(303);
@@ -921,7 +857,7 @@ void handleCaptureSave() {
   }
   const String key = signalKey(id);
   if (preferences.putBytes(key.c_str(), &signal, sizeof(signal)) != sizeof(signal)) {
-    lastAction = "Speichern fehlgeschlagen: NVS voll oder Schreibfehler";
+    lastAction = "Save failed: NVS full or write error";
     logEvent(lastAction);
     webServer.send(500, "text/plain", lastAction);
     return;
@@ -930,14 +866,14 @@ void handleCaptureSave() {
   if (!saveSignalIndex()) {
     signals.pop_back();
     preferences.remove(key.c_str());
-    lastAction = "Speichern fehlgeschlagen: Signalindex konnte nicht geschrieben werden";
+    lastAction = "Save failed: could not write signal index";
     logEvent(lastAction);
     webServer.send(500, "text/plain", lastAction);
     return;
   }
   publishDiscovery(signal);
-  lastAction = "Gespeichert: " + label;
-  logEvent("Signal gespeichert: " + label + " (" + String(signal.count) + " Pulse)");
+  lastAction = "Saved: " + label;
+  logEvent("Signal saved: " + label + " (" + String(signal.count) + " pulses)");
   webServer.sendHeader("Location", "/");
   webServer.send(303);
 }
@@ -962,14 +898,14 @@ void handleSignalSave() {
     }
   }
   if (signalIndex == signals.size()) {
-    webServer.send(404, "text/plain", "Signal nicht gefunden");
+    webServer.send(404, "text/plain", "Signal not found.");
     return;
   }
 
   const float frequency = webServer.arg("frequency").toFloat();
   const String label = webServer.arg("name");
   if (!validFrequency(frequency) || label.isEmpty()) {
-    webServer.send(400, "text/plain", "Name oder Frequenz ungueltig");
+    webServer.send(400, "text/plain", "Invalid signal name or frequency.");
     return;
   }
 
@@ -988,19 +924,19 @@ void handleSignalSave() {
     if (!line.isEmpty()) {
       if (line.length() < 3 || (line[0] != 'H' && line[0] != 'L') || line[1] != ':' ||
           updated.count >= MAX_PULSES) {
-        webServer.send(400, "text/plain", "Pulsfolge ungueltig oder zu lang");
+        webServer.send(400, "text/plain", "Invalid or too many pulse entries.");
         return;
       }
       const String durationText = line.substring(2);
       for (size_t digit = 0; digit < durationText.length(); digit++) {
         if (!isDigit(durationText[digit])) {
-          webServer.send(400, "text/plain", "Pulsdauer muss eine Zahl sein");
+          webServer.send(400, "text/plain", "Pulse duration must be a number.");
           return;
         }
       }
       const long duration = durationText.toInt();
       if (duration < 1 || duration > 65535) {
-        webServer.send(400, "text/plain", "Pulsdauer muss zwischen 1 und 65535 us liegen");
+        webServer.send(400, "text/plain", "Pulse duration must be between 1 and 65535 us.");
         return;
       }
       updated.levels[updated.count] = line[0] == 'H' ? HIGH : LOW;
@@ -1011,13 +947,13 @@ void handleSignalSave() {
     lineStart = (size_t)lineEnd + 1;
   }
   if (updated.count < 4) {
-    webServer.send(400, "text/plain", "Mindestens vier Pulse sind erforderlich");
+    webServer.send(400, "text/plain", "At least four pulses are required.");
     return;
   }
 
   for (size_t index = 0; index < signals.size(); index++) {
     if (index != signalIndex && sameSignal(signals[index], updated)) {
-      webServer.send(409, "text/plain", "Diese Pulsfolge ist bereits unter einem anderen Namen gespeichert");
+      webServer.send(409, "text/plain", "This pulse sequence is already saved under another name.");
       return;
     }
   }
@@ -1025,25 +961,19 @@ void handleSignalSave() {
   const StoredSignal previous = signals[signalIndex];
   const String key = signalKey(id);
   if (preferences.putBytes(key.c_str(), &updated, sizeof(updated)) != sizeof(updated)) {
-    webServer.send(500, "text/plain", "NVS konnte die Aenderung nicht speichern");
+    webServer.send(500, "text/plain", "Could not save changes to NVS.");
     return;
   }
   signals[signalIndex] = updated;
   if (!saveSignalIndex()) {
     signals[signalIndex] = previous;
     preferences.putBytes(key.c_str(), &previous, sizeof(previous));
-    webServer.send(500, "text/plain", "Signalindex konnte nicht gespeichert werden");
+    webServer.send(500, "text/plain", "Could not save signal index.");
     return;
   }
   publishDiscovery(updated);
-  lastAction = "Signal bearbeitet: " + label;
+  lastAction = "Signal updated: " + label;
   logEvent(lastAction);
-  webServer.sendHeader("Location", "/");
-  webServer.send(303);
-}
-
-void handleTestSend() {
-  sendTestSignal();
   webServer.sendHeader("Location", "/");
   webServer.send(303);
 }
@@ -1101,7 +1031,7 @@ void handleApiStatus() {
 
 void handleApiPulses() {
   if (captureActive) {
-    webServer.send(409, "text/plain", "Aufnahme laeuft noch");
+    webServer.send(409, "text/plain", "Capture is still in progress.");
     return;
   }
   JsonDocument document;
@@ -1134,20 +1064,20 @@ void handleSettings() {
       preferences.putString("mpass", webServer.arg("mqtt_password"));
     }
   }
-  webServer.send(200, "text/html; charset=utf-8", pageStart("Gespeichert") +
-    "<h1>Einstellungen gespeichert</h1><p>Der Bridge startet neu.</p>" + pageEnd());
+  webServer.send(200, "text/html; charset=utf-8", pageStart("Settings saved") +
+    "<h1>Settings saved</h1><p>Restarting the bridge.</p>" + pageEnd());
   delay(800);
   ESP.restart();
 }
 
 void handleSettingsPage() {
   const String body = settingsForm(false);
-  webServer.send(200, "text/html; charset=utf-8", pageStart("Netzwerk") + body + pageEnd());
+  webServer.send(200, "text/html; charset=utf-8", pageStart("Network") + body + pageEnd());
 }
 
 void handleFirmwarePage() {
   const String body = String("<h1>Firmware aktualisieren</h1><form method='post' action='/firmware' enctype='multipart/form-data'>") +
-    "<input type='file' name='firmware' accept='.bin' required><button>Firmware installieren</button></form>";
+    "<input type='file' name='firmware' accept='.bin' required><button>Install firmware</button></form>";
   webServer.send(200, "text/html; charset=utf-8", pageStart("Firmware") + body + pageEnd());
 }
 
@@ -1164,7 +1094,7 @@ void handleFirmwareUpload() {
 
 void handleFirmwareDone() {
   const bool success = !Update.hasError();
-  webServer.send(success ? 200 : 500, "text/plain", success ? "Update erfolgreich, Neustart" : "Firmware-Update fehlgeschlagen");
+  webServer.send(success ? 200 : 500, "text/plain", success ? "Update successful. Restarting." : "Firmware update failed.");
   if (success) {
     delay(500);
     ESP.restart();
@@ -1185,14 +1115,13 @@ void startWebServer() {
   webServer.on("/send", HTTP_POST, handleSend);
   webServer.on("/signal", HTTP_GET, handleSignalEditor);
   webServer.on("/signal/save", HTTP_POST, handleSignalSave);
-  webServer.on("/test-send", HTTP_POST, handleTestSend);
   webServer.on("/delete", HTTP_POST, handleDelete);
   webServer.on("/settings", HTTP_GET, handleSettingsPage);
   webServer.on("/settings", HTTP_POST, handleSettings);
   webServer.on("/firmware", HTTP_GET, handleFirmwarePage);
   webServer.on("/firmware", HTTP_POST, handleFirmwareDone, handleFirmwareUpload);
   webServer.on("/restart", HTTP_GET, []() {
-    webServer.send(200, "text/plain", "Neustart");
+    webServer.send(200, "text/plain", "Restarting");
     delay(300);
     ESP.restart();
   });
@@ -1212,7 +1141,7 @@ void connectWifi() {
   if (wifiSsid.isEmpty()) {
     WiFi.mode(WIFI_AP);
     WiFi.softAP(AP_NAME, "cc1101setup");
-    logEvent("Setup-Access-Point gestartet");
+    logEvent("Setup access point started");
     startWebServer();
     return;
   }
@@ -1224,13 +1153,13 @@ void connectWifi() {
     delay(250);
   }
   if (WiFi.status() == WL_CONNECTED) {
-    logEvent("WLAN verbunden: " + WiFi.localIP().toString());
+    logEvent("Wi-Fi connected: " + WiFi.localIP().toString());
     startWebServer();
     startOta();
   } else {
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAP(AP_NAME, "cc1101setup");
-    logEvent("WLAN nicht erreichbar, Setup-Access-Point gestartet");
+    logEvent("Wi-Fi unavailable; setup access point started");
     startWebServer();
   }
 }
@@ -1253,7 +1182,7 @@ void setup() {
   }
 #endif
   snprintf(hostname, sizeof(hostname), "cc1101-%s", bridgeId);
-  logEvent("Bridge gestartet: " + String(hostname));
+  logEvent("Bridge started: " + String(hostname));
   pinMode(PIN_CC_CS, OUTPUT);
   digitalWrite(PIN_CC_CS, HIGH);
   pinMode(PIN_CC_GDO0, INPUT);
@@ -1276,11 +1205,11 @@ void setup() {
   cc1101Version = ccReadStatusRegister(CC_VERSION);
   cc1101Detected = isKnownCc1101Version(cc1101Version);
   if (cc1101Detected) {
-    logEvent("CC1101 erkannt: PARTNUM 0x" + String(cc1101PartNumber, HEX) +
+    logEvent("CC1101 detected: PARTNUM 0x" + String(cc1101PartNumber, HEX) +
              ", VERSION 0x" + String(cc1101Version, HEX));
   } else {
-    logEvent("CC1101 nicht erkannt: PARTNUM 0x" + String(cc1101PartNumber, HEX) +
-             ", VERSION 0x" + String(cc1101Version, HEX) + " - SPI/Versorgung pruefen");
+    logEvent("CC1101 not detected: PARTNUM 0x" + String(cc1101PartNumber, HEX) +
+             ", VERSION 0x" + String(cc1101Version, HEX) + " - check SPI and power");
   }
   ccConfigure(activeFrequencyMHz, true);
   mqttClient.setServer(mqttHost.c_str(), mqttPort);
