@@ -25,6 +25,7 @@ constexpr uint8_t PIN_CC_MOSI = 23;
 constexpr uint8_t CC_IOCFG2 = 0x00;
 constexpr uint16_t MAX_PULSES = 600;
 constexpr uint8_t MAX_SIGNALS = 48;
+constexpr uint8_t MAX_ZONES = 16;
 constexpr uint8_t MAX_LOG_ENTRIES = 30;
 constexpr uint8_t MAX_CAPTURE_HISTORY = 2;
 constexpr uint32_t MQTT_BUFFER_SIZE = 768;
@@ -71,6 +72,16 @@ constexpr uint8_t CC_STX = 0x35;
 constexpr uint8_t CC_SIDLE = 0x36;
 
 struct StoredSignal {
+  char zone[16];
+  char id[16];
+  char label[33];
+  float frequencyMHz;
+  uint16_t count;
+  uint16_t durations[MAX_PULSES];
+  uint8_t levels[MAX_PULSES];
+};
+
+struct LegacyStoredSignal {
   char id[12];
   char label[33];
   float frequencyMHz;
@@ -97,6 +108,7 @@ WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 WebServer webServer(80);
 std::vector<StoredSignal> signals;
+std::vector<String> zones;
 String wifiSsid;
 String wifiPassword;
 String mqttHost;
@@ -289,7 +301,7 @@ String htmlEscape(const String& value) {
 }
 
 bool validSignalId(const String& id) {
-  if (id.isEmpty() || id.length() > 11 ||
+  if (id.isEmpty() || id.length() > 15 ||
       !((id[0] >= 'a' && id[0] <= 'z') || (id[0] >= '0' && id[0] <= '9')) ||
       !((id[id.length() - 1] >= 'a' && id[id.length() - 1] <= 'z') ||
         (id[id.length() - 1] >= '0' && id[id.length() - 1] <= '9'))) return false;
@@ -300,8 +312,115 @@ bool validSignalId(const String& id) {
   return true;
 }
 
+String signalIdentity(const String& zone, const String& id) {
+  return zone + "/" + id;
+}
+
+bool parseSignalIdentity(const String& identity, String& zone, String& id) {
+  const int separator = identity.indexOf('/');
+  if (separator < 1 || separator == identity.length() - 1 ||
+      identity.indexOf('/', separator + 1) >= 0) return false;
+  zone = identity.substring(0, separator);
+  id = identity.substring(separator + 1);
+  return validSignalId(zone) && validSignalId(id);
+}
+
+String zoneForLabel(const String& originalLabel) {
+  String label = originalLabel;
+  label.toLowerCase();
+  if (label.indexOf("office") >= 0) return "office";
+  if (label.indexOf("livingroom") >= 0 || label.indexOf("living_room") >= 0) return "livingroom";
+  if (label.indexOf("bedroom") >= 0) return "bedroom";
+  return "unassigned";
+}
+
+String actionNameForLabel(const String& originalLabel, const String& currentId) {
+  String label = originalLabel;
+  label.toLowerCase();
+  if (currentId.startsWith("wc_") && validSignalId(currentId)) return currentId;
+  if (label == "windcalm_office_power_switch" || currentId == "windcalm_of") return "wc_power";
+  if (label == "windcalm_office_light_switch" || currentId == "windcalm__2") return "wc_light";
+  if (label == "windcalm_office_light_mode" || currentId == "windcalm__3") return "wc_light_mode";
+  const String levelPrefix = "windcalm_office_vent_level_";
+  if (label.startsWith(levelPrefix) && label.length() == levelPrefix.length() + 1 &&
+      label[label.length() - 1] >= '1' && label[label.length() - 1] <= '6') {
+    return "wc_level_" + label.substring(label.length() - 1);
+  }
+  if (currentId.startsWith("windcalm__") && currentId.length() == 11 &&
+      currentId[10] >= '4' && currentId[10] <= '9') {
+    return "wc_level_" + String(currentId[10] - '3');
+  }
+  if (currentId == "windcalm_13") return "wc_direction";
+  if (currentId == "windcalm_10") return "wc_timer_1h";
+  if (currentId == "windcalm_11") return "wc_timer_2h";
+  if (currentId == "windcalm_12") return "wc_timer_4h";
+  if (currentId == "windcalm_14") return "wc_mute";
+
+  const String prefix = "windcalm_";
+  if (label.startsWith(prefix)) label.remove(0, prefix.length());
+  const int separator = label.indexOf('_');
+  if (separator >= 0) {
+    const String possibleZone = label.substring(0, separator);
+    if (possibleZone == "office" || possibleZone == "livingroom" || possibleZone == "bedroom") {
+      label.remove(0, separator + 1);
+    }
+  }
+  if (label == "power_switch") return "wc_power";
+  if (label == "light_switch") return "wc_light";
+  if (label == "light_mode") return "wc_light_mode";
+  if (label.startsWith("vent_level_") && label.length() == 12 &&
+      label[11] >= '1' && label[11] <= '6') {
+    return "wc_level_" + label.substring(11);
+  }
+  if (label == "direction" || label == "fan_direction") return "wc_direction";
+  if (label == "timer_1h") return "wc_timer_1h";
+  if (label == "timer_2h") return "wc_timer_2h";
+  if (label == "timer_4h") return "wc_timer_4h";
+  if (label == "mute" || label == "mute_switch") return "wc_mute";
+  if (label.length() > 12) label = label.substring(label.length() - 12);
+  if (label.isEmpty()) label = "signal";
+  return "wc_" + label;
+}
+
+bool signalKeyAvailable(const String& zone, const String& id, size_t exceptIndex = (size_t)-1);
+
+String uniqueActionName(const String& zone, const String& proposed) {
+  String candidate = proposed;
+  uint8_t suffix = 2;
+  while (true) {
+    bool duplicate = false;
+    for (const StoredSignal& signal : signals) {
+      if (zone == signal.zone && candidate == signal.id) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (!duplicate && signalKeyAvailable(zone, candidate)) return candidate;
+    const String suffixText = "_" + String(suffix++);
+    const size_t baseLength = candidate.length() + suffixText.length() <= 15
+      ? candidate.length()
+      : 15 - suffixText.length();
+    candidate = proposed.substring(0, baseLength) + suffixText;
+  }
+}
+
+String oldActionNameForId(const String& id) {
+  if (id == "wc_power") return "windcalm_of";
+  if (id == "wc_light") return "windcalm__2";
+  if (id == "wc_light_mode") return "windcalm__3";
+  if (id.startsWith("wc_level_") && id.length() == 10 && id[9] >= '1' && id[9] <= '6') {
+    return "windcalm__" + String((uint8_t)(id[9] - '0' + 3));
+  }
+  if (id == "wc_direction") return "windcalm_13";
+  if (id == "wc_timer_1h") return "windcalm_10";
+  if (id == "wc_timer_2h") return "windcalm_11";
+  if (id == "wc_timer_4h") return "windcalm_12";
+  if (id == "wc_mute") return "windcalm_14";
+  return id;
+}
+
 bool sameSignal(const StoredSignal& first, const StoredSignal& second) {
-  if (first.count < 8 || first.count != second.count ||
+  if (strcmp(first.zone, second.zone) != 0 || first.count < 8 || first.count != second.count ||
       first.frequencyMHz < second.frequencyMHz - 0.05f ||
       first.frequencyMHz > second.frequencyMHz + 0.05f) return false;
 
@@ -319,8 +438,25 @@ bool sameSignal(const StoredSignal& first, const StoredSignal& second) {
   return true;
 }
 
-String signalKey(const String& id) {
-  return "s_" + id;
+String signalKey(const String& zone, const String& id) {
+  uint32_t hash = 2166136261UL;
+  const String identity = signalIdentity(zone, id);
+  for (size_t index = 0; index < identity.length(); index++) {
+    hash = (hash ^ (uint8_t)identity[index]) * 16777619UL;
+  }
+  char key[12];
+  snprintf(key, sizeof(key), "z_%08lx", (unsigned long)hash);
+  return key;
+}
+
+bool signalKeyAvailable(const String& zone, const String& id, size_t exceptIndex) {
+  const String key = signalKey(zone, id);
+  for (size_t index = 0; index < signals.size(); index++) {
+    const StoredSignal& signal = signals[index];
+    if (index != exceptIndex && signalKey(signal.zone, signal.id) == key &&
+        (zone != signal.zone || id != signal.id)) return false;
+  }
+  return true;
 }
 
 bool saveSignalIndex() {
@@ -328,6 +464,7 @@ bool saveSignalIndex() {
   JsonArray entries = document.to<JsonArray>();
   for (const StoredSignal& signal : signals) {
     JsonObject entry = entries.add<JsonObject>();
+    entry["zone"] = signal.zone;
     entry["id"] = signal.id;
     entry["label"] = signal.label;
     entry["frequency"] = signal.frequencyMHz;
@@ -337,24 +474,153 @@ bool saveSignalIndex() {
   return preferences.putString("index", json) == json.length();
 }
 
+bool zoneExists(const String& zone) {
+  for (const String& existing : zones) {
+    if (existing == zone) return true;
+  }
+  return false;
+}
+
+bool addZone(const String& zone) {
+  if (!validSignalId(zone) || zoneExists(zone) || zones.size() >= MAX_ZONES) return false;
+  zones.push_back(zone);
+  return true;
+}
+
+bool saveZones() {
+  JsonDocument document;
+  JsonArray entries = document.to<JsonArray>();
+  for (const String& zone : zones) entries.add(zone);
+  String json;
+  serializeJson(document, json);
+  if (preferences.getString("zones", "") == json) return true;
+  return preferences.putString("zones", json) == json.length();
+}
+
+void loadZones() {
+  zones.clear();
+  const String savedZones = preferences.getString("zones", "");
+  if (savedZones.isEmpty()) {
+    addZone("office");
+    addZone("livingroom");
+    addZone("bedroom");
+    addZone("unassigned");
+  }
+  JsonDocument document;
+  if (!savedZones.isEmpty() && !deserializeJson(document, savedZones)) {
+    for (JsonVariantConst entry : document.as<JsonArrayConst>()) {
+      const String zone = entry.as<String>();
+      addZone(zone);
+    }
+  }
+  for (const StoredSignal& signal : signals) addZone(signal.zone);
+  saveZones();
+}
+
+String renderZoneOptions(const String& selectedZone) {
+  String options;
+  for (const String& zone : zones) {
+    options += "<option value='" + htmlEscape(zone) + "'";
+    if (zone == selectedZone) options += " selected";
+    options += ">" + htmlEscape(zone) + "</option>";
+  }
+  return options;
+}
+
+String renderZoneList() {
+  String list = "<ul class='zone-list'>";
+  for (const String& zone : zones) {
+    uint8_t signalCount = 0;
+    for (const StoredSignal& signal : signals) {
+      if (zone == signal.zone) signalCount++;
+    }
+    list += "<li><span><b>" + htmlEscape(zone) + "</b><small class='muted'> · " +
+      String(signalCount) + (signalCount == 1 ? " signal" : " signals") + "</small></span>"
+      "<form method='post' action='/zone/delete'";
+    if (signalCount == 0) list += " onsubmit=\"return confirm('Delete this zone?')\"";
+    list += "><input type='hidden' name='zone' value='" + htmlEscape(zone) + "'>";
+    if (signalCount == 0) list += "<button>Delete</button>";
+    else list += "<button disabled title='Delete the signals in this zone first'>Delete</button>";
+    list += "</form></li>";
+  }
+  list += "</ul>";
+  return list;
+}
+
 void loadSignals() {
   signals.clear();
   JsonDocument document;
   if (deserializeJson(document, preferences.getString("index", "[]"))) return;
+  std::vector<String> obsoleteKeys;
+  bool indexChanged = false;
+  bool migrationIncomplete = false;
   for (JsonObjectConst entry : document.as<JsonArrayConst>()) {
     const String id = entry["id"] | "";
-    if (id.isEmpty() || id.length() > 11 || signals.size() >= MAX_SIGNALS) continue;
+    if (!validSignalId(id) || signals.size() >= MAX_SIGNALS) continue;
+    String zone = entry["zone"] | "";
+    if (zone.isEmpty()) {
+      LegacyStoredSignal legacy{};
+      const String legacyKey = "s_" + id;
+      if (preferences.getBytesLength(legacyKey.c_str()) != sizeof(legacy) ||
+          preferences.getBytes(legacyKey.c_str(), &legacy, sizeof(legacy)) != sizeof(legacy) ||
+          legacy.count > MAX_PULSES) {
+        migrationIncomplete = true;
+        continue;
+      }
+      const String label = legacy.label;
+      zone = zoneForLabel(label);
+      const String actionId = uniqueActionName(zone, actionNameForLabel(label, id));
+      StoredSignal migrated{};
+      strlcpy(migrated.zone, zone.c_str(), sizeof(migrated.zone));
+      strlcpy(migrated.id, actionId.c_str(), sizeof(migrated.id));
+      strlcpy(migrated.label, actionId.c_str(), sizeof(migrated.label));
+      migrated.frequencyMHz = legacy.frequencyMHz;
+      migrated.count = legacy.count;
+      memcpy(migrated.durations, legacy.durations, sizeof(migrated.durations));
+      memcpy(migrated.levels, legacy.levels, sizeof(migrated.levels));
+      const String key = signalKey(zone, actionId);
+      if (!signalKeyAvailable(zone, actionId) ||
+          preferences.putBytes(key.c_str(), &migrated, sizeof(migrated)) != sizeof(migrated)) {
+        migrationIncomplete = true;
+        continue;
+      }
+      signals.push_back(migrated);
+      obsoleteKeys.push_back(legacyKey);
+      indexChanged = true;
+      continue;
+    }
+    if (!validSignalId(zone)) continue;
+    if (!signalKeyAvailable(zone, id)) continue;
     StoredSignal signal{};
-    const String key = signalKey(id);
+    const String key = signalKey(zone, id);
     if (preferences.getBytesLength(key.c_str()) != sizeof(signal)) continue;
     if (preferences.getBytes(key.c_str(), &signal, sizeof(signal)) != sizeof(signal)) continue;
-    if (signal.count > MAX_PULSES) continue;
+    if (signal.count > MAX_PULSES || strcmp(signal.zone, zone.c_str()) != 0 ||
+        strcmp(signal.id, id.c_str()) != 0) continue;
+    const String newZone = zone == "unassigned" ? zoneForLabel(signal.label) : zone;
+    const String newId = uniqueActionName(newZone, actionNameForLabel(signal.label, id));
+    if (newZone != zone || newId != id || String(signal.label) != newId) {
+      strlcpy(signal.zone, newZone.c_str(), sizeof(signal.zone));
+      strlcpy(signal.id, newId.c_str(), sizeof(signal.id));
+      strlcpy(signal.label, newId.c_str(), sizeof(signal.label));
+      const String newKey = signalKey(newZone, newId);
+      if (preferences.putBytes(newKey.c_str(), &signal, sizeof(signal)) != sizeof(signal)) {
+        migrationIncomplete = true;
+        continue;
+      }
+      if (newKey != key) obsoleteKeys.push_back(key);
+      indexChanged = true;
+    }
     signals.push_back(signal);
+  }
+  if (indexChanged && !migrationIncomplete && saveSignalIndex()) {
+    for (const String& key : obsoleteKeys) preferences.remove(key.c_str());
+    logEvent("Migrated saved signals to consistent zone-based names");
   }
 }
 
-String discoveryObjectId(const String& signalId) {
-  return String("cc1101_") + bridgeId + "_" + signalId;
+String discoveryObjectId(const String& zone, const String& signalId) {
+  return String("cc1101_") + bridgeId + "_" + zone + "_" + signalId;
 }
 
 String discoveryConfigTopic(const String& objectId) {
@@ -367,10 +633,14 @@ String legacyDiscoveryConfigTopic(const String& signalId) {
 
 void publishDiscovery(const StoredSignal& signal) {
   if (!mqttClient.connected()) return;
-  const String objectId = discoveryObjectId(signal.id);
+  const String objectId = discoveryObjectId(signal.zone, signal.id);
   const String discoveryTopic = discoveryConfigTopic(objectId);
-  const String commandTopic = mqttBase + "/signal/" + signal.id + "/set";
+  const String commandTopic = mqttBase + "/signal/" + signal.zone + "/" + signal.id + "/set";
   const String legacyTopic = legacyDiscoveryConfigTopic(signal.id);
+  const String oldDiscoveryTopic = discoveryConfigTopic(String("cc1101_") + bridgeId + "_" + signal.id);
+  const String previousId = oldActionNameForId(signal.id);
+  const String previousLegacyTopic = legacyDiscoveryConfigTopic(previousId);
+  const String previousDiscoveryTopic = discoveryConfigTopic(String("cc1101_") + bridgeId + "_" + previousId);
   char payload[MQTT_BUFFER_SIZE];
   JsonDocument document;
   document["name"] = signal.label;
@@ -383,13 +653,18 @@ void publishDiscovery(const StoredSignal& signal) {
   document["payload_not_available"] = "offline";
   JsonObject device = document["device"].to<JsonObject>();
   JsonArray identifiers = device["identifiers"].to<JsonArray>();
-  identifiers.add(String("cc1101_bridge_") + bridgeId);
-  device["name"] = String("CC1101 Bridge ") + bridgeId;
+  identifiers.add(String("cc1101_bridge_") + bridgeId + "_" + signal.zone);
+  device["name"] = String("CC1101 Bridge ") + bridgeId + " " + signal.zone;
   device["manufacturer"] = "ESP32 / CC1101";
   device["model"] = "OOK signal bridge";
   const size_t length = serializeJson(document, payload, sizeof(payload));
   if (length > 0) {
     mqttClient.publish(legacyTopic.c_str(), "", true);
+    if (previousLegacyTopic != legacyTopic) mqttClient.publish(previousLegacyTopic.c_str(), "", true);
+    if (oldDiscoveryTopic != discoveryTopic) mqttClient.publish(oldDiscoveryTopic.c_str(), "", true);
+    if (previousDiscoveryTopic != discoveryTopic && previousDiscoveryTopic != oldDiscoveryTopic) {
+      mqttClient.publish(previousDiscoveryTopic.c_str(), "", true);
+    }
     mqttClient.publish(discoveryTopic.c_str(), payload, true);
   }
 }
@@ -398,9 +673,9 @@ void publishAllDiscovery() {
   for (const StoredSignal& signal : signals) publishDiscovery(signal);
 }
 
-void sendSignal(const String& id) {
+void sendSignal(const String& zone, const String& id) {
   for (const StoredSignal& signal : signals) {
-    if (id != signal.id || signal.count == 0) continue;
+    if (zone != signal.zone || id != signal.id || signal.count == 0) continue;
     ccConfigure(signal.frequencyMHz, false);
     pinMode(PIN_CC_GDO0, OUTPUT);
     digitalWrite(PIN_CC_GDO0, signal.levels[0] ? HIGH : LOW);
@@ -417,7 +692,7 @@ void sendSignal(const String& id) {
     logEvent("Sent: " + String(signal.label));
     return;
   }
-  lastAction = "Signal not found: " + id;
+  lastAction = "Signal not found: " + signalIdentity(zone, id);
   logEvent(lastAction);
 }
 
@@ -431,8 +706,10 @@ void mqttCallback(char* topic, uint8_t* payload, unsigned int length) {
   command.trim();
   command.toUpperCase();
   if (command != "PRESS" && command != "ON" && command != "1") return;
-  const String id = receivedTopic.substring(prefix.length(), receivedTopic.length() - 4);
-  sendSignal(id);
+  const String identity = receivedTopic.substring(prefix.length(), receivedTopic.length() - 4);
+  String zone;
+  String id;
+  if (parseSignalIdentity(identity, zone, id)) sendSignal(zone, id);
 }
 
 void reconnectMqtt() {
@@ -450,7 +727,7 @@ void reconnectMqtt() {
   }
   if (connected) {
     mqttClient.publish(availabilityTopic.c_str(), "online", true);
-    mqttClient.subscribe((mqttBase + "/signal/+/set").c_str());
+    mqttClient.subscribe((mqttBase + "/signal/+/+/set").c_str());
     publishAllDiscovery();
     lastAction = "MQTT connected";
     logEvent("MQTT connected");
@@ -470,7 +747,11 @@ String pageStart(const String& title) {
     " · CC1101</title><style>body{font:16px system-ui,sans-serif;max-width:900px;margin:0 auto;padding:18px;"
     "background:#101820;color:#e8eff2}nav{display:flex;gap:16px;padding:12px 0;border-bottom:1px solid #52616b}"
     "a{color:#71d6c5}main{padding-top:16px}.panel{padding:14px 0;border-bottom:1px solid #394952}"
-    "input{font:inherit;padding:9px;margin:4px 4px 4px 0;max-width:100%;box-sizing:border-box}"
+    "input{font:inherit;max-width:100%;box-sizing:border-box}"
+    "input:not([type=range]):not([type=hidden]):not([type=file]),select,textarea{font:inherit;"
+    "color:#e8eff2;background:#18242c;border:1px solid #52616b;border-radius:4px;box-sizing:border-box;color-scheme:dark}"
+    "input:not([type=range]):not([type=hidden]):not([type=file]),select{min-height:42px;padding:9px;"
+    "margin:4px 4px 4px 0;max-width:100%}input[type=range]{min-height:0;padding:0}"
     "button,.button-link,input[type=file]::file-selector-button{display:inline-block;font:inherit;padding:9px 14px;"
     "margin:4px 4px 4px 0;border:0;"
     "border-radius:4px;background:#71d6c5;color:#102126;text-decoration:none;cursor:pointer}"
@@ -480,7 +761,10 @@ String pageStart(const String& title) {
     ".setup-form{max-width:680px}.setup-section{padding:14px 0;border-bottom:1px solid #394952}"
     ".setup-section h2{font-size:1.1em;margin:0 0 12px}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:12px 16px}"
     ".form-grid label{display:flex;flex-direction:column;gap:5px;color:#a7b5bc;font-size:.92em}"
-    ".form-grid input{width:100%;margin:0;background:#18242c;color:#e8eff2;border:1px solid #52616b;border-radius:4px}"
+    ".form-grid input:not([type=range]):not([type=hidden]):not([type=file]),.form-grid select{width:100%;margin:0}"
+    ".zone-list{list-style:none;padding:0;margin:0 0 12px;max-width:680px}"
+    ".zone-list li{display:flex;align-items:center;justify-content:space-between;gap:16px;"
+    "padding:8px 0;border-bottom:1px solid #394952}.zone-list form{margin:0}.zone-list small{margin-left:5px}"
     ".form-actions{padding-top:14px}"
     ".file-picker{display:flex;align-items:center;gap:8px;flex-wrap:wrap}"
     ".file-picker span{color:#a7b5bc;overflow-wrap:anywhere}"
@@ -529,12 +813,13 @@ String renderSignalList() {
   if (signals.empty()) body += "<p class='muted'>No signals saved yet.</p>";
   for (const StoredSignal& signal : signals) {
     body += "<section class='panel'><h3>" + htmlEscape(signal.label) + "</h3><p class='muted'>" +
+      htmlEscape(signal.zone) + " · " + htmlEscape(signal.id) + " · " +
       String(signal.frequencyMHz, 2) + " MHz · " + String(signal.count) + " pulses</p><div class='row'><form method='get' action='/signal'>" +
-      "<input type='hidden' name='id' value='" + htmlEscape(signal.id) + "'><button>Edit</button></form>"
+      "<input type='hidden' name='id' value='" + htmlEscape(signalIdentity(signal.zone, signal.id)) + "'><button>Edit</button></form>"
       "<form method='post' action='/send'>" +
-      "<input type='hidden' name='id' value='" + htmlEscape(signal.id) + "'><button>Send</button></form>" +
+      "<input type='hidden' name='id' value='" + htmlEscape(signalIdentity(signal.zone, signal.id)) + "'><button>Send</button></form>" +
       "<form method='post' action='/delete' onsubmit=\"return confirm('Delete signal?')\">" +
-      "<input type='hidden' name='id' value='" + htmlEscape(signal.id) + "'><button>Delete</button></form></div></section>";
+      "<input type='hidden' name='id' value='" + htmlEscape(signalIdentity(signal.zone, signal.id)) + "'><button>Delete</button></form></div></section>";
   }
   return body;
 }
@@ -549,6 +834,7 @@ void handleSignalsExport() {
     if (!first) webServer.sendContent(",");
     first = false;
     JsonDocument document;
+    document["zone"] = signal.zone;
     document["id"] = signal.id;
     document["label"] = signal.label;
     document["frequencyMHz"] = signal.frequencyMHz;
@@ -566,9 +852,14 @@ void handleSignalsExport() {
   webServer.sendContent("");
 }
 
-String renderSignalEditor(const String& id) {
+String renderSignalEditor(const String& identity) {
+  String zone;
+  String id;
+  if (!parseSignalIdentity(identity, zone, id)) {
+    return pageStart("Signal not found") + "<h1>Signal not found</h1><p><a href='/'>Back</a></p>" + pageEnd();
+  }
   for (const StoredSignal& signal : signals) {
-    if (id != signal.id) continue;
+    if (zone != signal.zone || id != signal.id) continue;
 
     String pulseData;
     pulseData.reserve((size_t)signal.count * 9);
@@ -581,9 +872,10 @@ String renderSignalEditor(const String& id) {
     String body = "<h1>Edit signal</h1><p class='muted'>" + String(signal.count) +
       " pulses · Logic level and duration in microseconds, one entry per line.</p>"
       "<form method='post' action='/signal/save' class='setup-form'>"
-      "<input type='hidden' name='id' value='" + htmlEscape(signal.id) + "'>"
+      "<input type='hidden' name='id' value='" + htmlEscape(signalIdentity(signal.zone, signal.id)) + "'>"
       "<section class='setup-section'><div class='form-grid'>"
-      "<label>Signal name<input name='name' maxlength='32' value='" + htmlEscape(signal.label) + "' required></label>"
+      "<label>Zone<select name='zone' required>" + renderZoneOptions(signal.zone) + "</select></label>"
+      "<label>Signal name<input name='name' maxlength='15' pattern='[a-z0-9]+(_+[a-z0-9]+)*' value='" + htmlEscape(signal.id) + "' title='1-15 lowercase letters or digits, with underscores between characters' required></label>"
       "<label>Frequency (MHz)<input type='number' name='frequency' min='300' max='928' step='0.01' value='" +
       String(signal.frequencyMHz, 2) + "' required></label></div></section>"
       "<section class='setup-section'><label>Pulse sequence (H:us or L:us, one per line)"
@@ -604,19 +896,34 @@ void handleSignalImport() {
     return;
   }
 
-  const String id = document["id"] | "";
-  const String label = document["label"] | "";
+  const String sourceId = document["id"] | "";
+  const String sourceLabel = document["label"] | sourceId;
+  const String zone = document["zone"] | zoneForLabel(sourceLabel);
+  const String id = actionNameForLabel(sourceLabel, sourceId);
+  const String label = id;
   const float frequency = document["frequencyMHz"] | 0.0f;
   JsonArrayConst durations = document["durations"].as<JsonArrayConst>();
   JsonArrayConst levels = document["levels"].as<JsonArrayConst>();
-  if (!validSignalId(id) || label.isEmpty() || label.length() > 32 ||
+  if (!validSignalId(zone) || !validSignalId(id) || label.isEmpty() || label.length() > 32 ||
       !validFrequency(frequency) || durations.size() < 4 || durations.size() > MAX_PULSES ||
       levels.size() != durations.size()) {
     webServer.send(400, "text/plain", "Invalid signal metadata or pulse sequence");
     return;
   }
+  if (!zoneExists(zone)) {
+    if (!addZone(zone)) {
+      webServer.send(409, "text/plain", "Maximum number of zones reached.");
+      return;
+    }
+    if (!saveZones()) {
+      zones.pop_back();
+      webServer.send(500, "text/plain", "Could not save zone list.");
+      return;
+    }
+  }
 
   StoredSignal imported{};
+  strlcpy(imported.zone, zone.c_str(), sizeof(imported.zone));
   strlcpy(imported.id, id.c_str(), sizeof(imported.id));
   strlcpy(imported.label, label.c_str(), sizeof(imported.label));
   imported.frequencyMHz = frequency;
@@ -634,7 +941,7 @@ void handleSignalImport() {
 
   size_t signalIndex = signals.size();
   for (size_t index = 0; index < signals.size(); index++) {
-    if (id == signals[index].id) signalIndex = index;
+    if (zone == signals[index].zone && id == signals[index].id) signalIndex = index;
     else if (sameSignal(signals[index], imported)) {
       webServer.send(409, "text/plain", "This pulse sequence is already saved under another ID");
       return;
@@ -644,10 +951,14 @@ void handleSignalImport() {
     webServer.send(409, "text/plain", "Maximum number of saved signals reached");
     return;
   }
+  if (!signalKeyAvailable(zone, id, signalIndex)) {
+    webServer.send(409, "text/plain", "Zone/name storage key collision; choose a different name.");
+    return;
+  }
 
   const bool replacing = signalIndex < signals.size();
   const StoredSignal previous = replacing ? signals[signalIndex] : StoredSignal{};
-  const String key = signalKey(id);
+  const String key = signalKey(zone, id);
   if (preferences.putBytes(key.c_str(), &imported, sizeof(imported)) != sizeof(imported)) {
     webServer.send(500, "text/plain", "Could not save signal to NVS");
     return;
@@ -678,7 +989,11 @@ void handleRoot() {
     return;
   }
 
-  String body = "<h1>Signal manager</h1><section class='panel recorder'><h2>Signal recorder</h2>"
+  String body = "<h1>Signal manager</h1><section class='panel'><h2>Zones</h2>" + renderZoneList() +
+    "<form method='post' action='/zone/create' class='row'>"
+    "<label>New zone <input name='zone' maxlength='15' pattern='[a-z0-9]+(_+[a-z0-9]+)*'"
+    " title='1-15 lowercase letters or digits, with underscores between characters' required></label>"
+    "<button>Create zone</button></form></section><section class='panel recorder'><h2>Signal recorder</h2>"
     "<div class='recorder-step'><h3>1. Capture a signal</h3>"
     "<form method='post' action='/capture/start' class='form-grid' id='capture-form'>"
     "<label>Frequency (MHz)<input type='number' name='frequency' min='300' max='928' step='0.01' value='433.92' required></label>"
@@ -691,8 +1006,9 @@ void handleRoot() {
     "<details><summary>First 120 pulse durations</summary><p id='pulse-values' class='pulse-values'></p></details></div></div>"
     "<div class='recorder-step'><h3>2. Name and save the signal</h3>"
     "<form method='post' action='/capture/save' class='row'>"
-    "<label>Signal ID <input name='name' maxlength='11' pattern='[a-z0-9]+(_+[a-z0-9]+)*'"
-    " autocapitalize='none' spellcheck='false' title='1-11 characters: lowercase letters, digits, and underscores between characters' required></label>"
+    "<label>Zone <select name='zone' required>" + renderZoneOptions("office") + "</select></label>"
+    "<label>Signal name <input name='name' maxlength='15' pattern='[a-z0-9]+(_+[a-z0-9]+)*'"
+    " autocapitalize='none' spellcheck='false' title='1-15 lowercase letters or digits, with underscores between characters' required></label>"
     "<button id='save-button' disabled>Save signal</button></form></div></section>" +
     "<section class='panel'><h2>Back up / transfer signals</h2><div class='row'>"
     "<a class='button-link' href='/signals/export' download>Export JSON</a>"
@@ -809,6 +1125,60 @@ void handleCaptureStart() {
   webServer.send(303);
 }
 
+void handleZoneCreate() {
+  const String zone = webServer.arg("zone");
+  if (!validSignalId(zone)) {
+    webServer.send(400, "text/plain", "Invalid zone name.");
+    return;
+  }
+  if (zoneExists(zone)) {
+    webServer.send(409, "text/plain", "That zone already exists.");
+    return;
+  }
+  if (!addZone(zone)) {
+    webServer.send(409, "text/plain", "Maximum number of zones reached.");
+    return;
+  }
+  if (!saveZones()) {
+    zones.pop_back();
+    webServer.send(500, "text/plain", "Could not save zone list.");
+    return;
+  }
+  logEvent("Zone created: " + zone);
+  webServer.sendHeader("Location", "/");
+  webServer.send(303);
+}
+
+void handleZoneDelete() {
+  const String zone = webServer.arg("zone");
+  size_t zoneIndex = zones.size();
+  for (size_t index = 0; index < zones.size(); index++) {
+    if (zones[index] == zone) {
+      zoneIndex = index;
+      break;
+    }
+  }
+  if (zoneIndex == zones.size()) {
+    webServer.send(404, "text/plain", "Zone not found.");
+    return;
+  }
+  for (const StoredSignal& signal : signals) {
+    if (zone == signal.zone) {
+      webServer.send(409, "text/plain", "Delete the signals in this zone before deleting the zone.");
+      return;
+    }
+  }
+  zones.erase(zones.begin() + zoneIndex);
+  if (!saveZones()) {
+    zones.insert(zones.begin() + zoneIndex, zone);
+    webServer.send(500, "text/plain", "Could not save zone list.");
+    return;
+  }
+  logEvent("Zone deleted: " + zone);
+  webServer.sendHeader("Location", "/");
+  webServer.send(303);
+}
+
 void finishCapture() {
   if (!captureActive) return;
   detachInterrupt(digitalPinToInterrupt(PIN_CC_GDO0));
@@ -822,7 +1192,9 @@ void finishCapture() {
 
 void handleCaptureSave() {
   if (captureActive) finishCapture();
-  const String label = webServer.arg("name");
+  const String id = webServer.arg("name");
+  const String zone = webServer.arg("zone").isEmpty() ? "unassigned" : webServer.arg("zone");
+  const String label = id;
   if (label.isEmpty() || captureCount < 4) {
     logEvent("Not saved: fewer than 4 pulses or missing signal ID");
     webServer.send(400, "text/plain", "A signal ID is required and the capture must contain at least four pulses.");
@@ -832,18 +1204,26 @@ void handleCaptureSave() {
     webServer.send(400, "text/plain", "Maximum number of saved signals reached.");
     return;
   }
-  if (!validSignalId(label)) {
-    webServer.send(400, "text/plain", "Invalid signal ID: use 1-11 lowercase letters or digits, with underscores only between characters.");
+  if (!validSignalId(zone) || !validSignalId(id)) {
+    webServer.send(400, "text/plain", "Invalid zone or signal name: use 1-15 lowercase letters or digits, with underscores only between characters.");
     return;
   }
-  const String id = label;
+  if (!zoneExists(zone)) {
+    webServer.send(400, "text/plain", "Create the zone before saving a signal.");
+    return;
+  }
   for (const StoredSignal& existing : signals) {
-    if (id == existing.id) {
+    if (zone == existing.zone && id == existing.id) {
       webServer.send(409, "text/plain", "This signal ID is already in use.");
       return;
     }
   }
+  if (!signalKeyAvailable(zone, id)) {
+    webServer.send(409, "text/plain", "Zone/name storage key collision; choose a different name.");
+    return;
+  }
   StoredSignal signal{};
+  strlcpy(signal.zone, zone.c_str(), sizeof(signal.zone));
   strlcpy(signal.id, id.c_str(), sizeof(signal.id));
   strlcpy(signal.label, label.c_str(), sizeof(signal.label));
   signal.frequencyMHz = captureFrequencyMHz;
@@ -863,7 +1243,7 @@ void handleCaptureSave() {
     webServer.send(303);
     return;
   }
-  const String key = signalKey(id);
+  const String key = signalKey(zone, id);
   if (preferences.putBytes(key.c_str(), &signal, sizeof(signal)) != sizeof(signal)) {
     lastAction = "Save failed: NVS full or write error";
     logEvent(lastAction);
@@ -887,7 +1267,9 @@ void handleCaptureSave() {
 }
 
 void handleSend() {
-  sendSignal(webServer.arg("id"));
+  String zone;
+  String id;
+  if (parseSignalIdentity(webServer.arg("id"), zone, id)) sendSignal(zone, id);
   webServer.sendHeader("Location", "/");
   webServer.send(303);
 }
@@ -897,10 +1279,15 @@ void handleSignalEditor() {
 }
 
 void handleSignalSave() {
-  const String id = webServer.arg("id");
+  String oldZone;
+  String oldId;
+  if (!parseSignalIdentity(webServer.arg("id"), oldZone, oldId)) {
+    webServer.send(400, "text/plain", "Invalid signal identity.");
+    return;
+  }
   size_t signalIndex = signals.size();
   for (size_t index = 0; index < signals.size(); index++) {
-    if (id == signals[index].id) {
+    if (oldZone == signals[index].zone && oldId == signals[index].id) {
       signalIndex = index;
       break;
     }
@@ -911,14 +1298,21 @@ void handleSignalSave() {
   }
 
   const float frequency = webServer.arg("frequency").toFloat();
-  const String label = webServer.arg("name");
-  if (!validFrequency(frequency) || label.isEmpty()) {
+  const String newZone = webServer.arg("zone");
+  const String newId = webServer.arg("name");
+  if (!validSignalId(newZone) || !validSignalId(newId) || !validFrequency(frequency)) {
     webServer.send(400, "text/plain", "Invalid signal name or frequency.");
+    return;
+  }
+  if (!zoneExists(newZone)) {
+    webServer.send(400, "text/plain", "Create the zone before assigning a signal to it.");
     return;
   }
 
   StoredSignal updated = signals[signalIndex];
-  strlcpy(updated.label, label.c_str(), sizeof(updated.label));
+  strlcpy(updated.zone, newZone.c_str(), sizeof(updated.zone));
+  strlcpy(updated.id, newId.c_str(), sizeof(updated.id));
+  strlcpy(updated.label, newId.c_str(), sizeof(updated.label));
   updated.frequencyMHz = frequency;
   updated.count = 0;
   const String pulseData = webServer.arg("pulse_data");
@@ -960,14 +1354,23 @@ void handleSignalSave() {
   }
 
   for (size_t index = 0; index < signals.size(); index++) {
+    if (index != signalIndex && newZone == signals[index].zone && newId == signals[index].id) {
+      webServer.send(409, "text/plain", "This name is already used in that zone.");
+      return;
+    }
     if (index != signalIndex && sameSignal(signals[index], updated)) {
       webServer.send(409, "text/plain", "This pulse sequence is already saved under another name.");
       return;
     }
   }
+  if (!signalKeyAvailable(newZone, newId, signalIndex)) {
+    webServer.send(409, "text/plain", "Zone/name storage key collision; choose a different name.");
+    return;
+  }
 
   const StoredSignal previous = signals[signalIndex];
-  const String key = signalKey(id);
+  const String previousKey = signalKey(oldZone, oldId);
+  const String key = signalKey(newZone, newId);
   if (preferences.putBytes(key.c_str(), &updated, sizeof(updated)) != sizeof(updated)) {
     webServer.send(500, "text/plain", "Could not save changes to NVS.");
     return;
@@ -975,28 +1378,51 @@ void handleSignalSave() {
   signals[signalIndex] = updated;
   if (!saveSignalIndex()) {
     signals[signalIndex] = previous;
-    preferences.putBytes(key.c_str(), &previous, sizeof(previous));
+    if (key != previousKey) preferences.remove(key.c_str());
+    preferences.putBytes(previousKey.c_str(), &previous, sizeof(previous));
     webServer.send(500, "text/plain", "Could not save signal index.");
     return;
   }
+  if (key != previousKey) preferences.remove(previousKey.c_str());
+  if (mqttClient.connected() && (oldZone != newZone || oldId != newId)) {
+    const String previousTopic = discoveryConfigTopic(discoveryObjectId(oldZone, oldId));
+    const String previousLegacyTopic = discoveryConfigTopic(String("cc1101_") + bridgeId + "_" + oldId);
+    mqttClient.publish(previousTopic.c_str(), "", true);
+    if (previousLegacyTopic != previousTopic) mqttClient.publish(previousLegacyTopic.c_str(), "", true);
+  }
   publishDiscovery(updated);
-  lastAction = "Signal updated: " + label;
+  lastAction = "Signal updated: " + newId;
   logEvent(lastAction);
   webServer.sendHeader("Location", "/");
   webServer.send(303);
 }
 
 void handleDelete() {
-  const String id = webServer.arg("id");
+  String zone;
+  String id;
+  if (!parseSignalIdentity(webServer.arg("id"), zone, id)) {
+    webServer.sendHeader("Location", "/");
+    webServer.send(303);
+    return;
+  }
   for (size_t index = 0; index < signals.size(); index++) {
-    if (id != signals[index].id) continue;
+    if (zone != signals[index].zone || id != signals[index].id) continue;
     if (mqttClient.connected()) {
-      const String discoveryTopic = discoveryConfigTopic(discoveryObjectId(id));
+      const String discoveryTopic = discoveryConfigTopic(discoveryObjectId(zone, id));
       const String legacyTopic = legacyDiscoveryConfigTopic(id);
+      const String oldDiscoveryTopic = discoveryConfigTopic(String("cc1101_") + bridgeId + "_" + id);
+      const String previousId = oldActionNameForId(id);
+      const String previousLegacyTopic = legacyDiscoveryConfigTopic(previousId);
+      const String previousDiscoveryTopic = discoveryConfigTopic(String("cc1101_") + bridgeId + "_" + previousId);
       mqttClient.publish(discoveryTopic.c_str(), "", true);
       mqttClient.publish(legacyTopic.c_str(), "", true);
+      if (previousLegacyTopic != legacyTopic) mqttClient.publish(previousLegacyTopic.c_str(), "", true);
+      if (oldDiscoveryTopic != discoveryTopic) mqttClient.publish(oldDiscoveryTopic.c_str(), "", true);
+      if (previousDiscoveryTopic != discoveryTopic && previousDiscoveryTopic != oldDiscoveryTopic) {
+        mqttClient.publish(previousDiscoveryTopic.c_str(), "", true);
+      }
     }
-    preferences.remove(signalKey(id).c_str());
+    preferences.remove(signalKey(zone, id).c_str());
     signals.erase(signals.begin() + index);
     saveSignalIndex();
     break;
@@ -1129,6 +1555,8 @@ void startWebServer() {
   webServer.on("/signal/import", HTTP_POST, handleSignalImport);
   webServer.on("/api/status", HTTP_GET, handleApiStatus);
   webServer.on("/api/pulses", HTTP_GET, handleApiPulses);
+  webServer.on("/zone/create", HTTP_POST, handleZoneCreate);
+  webServer.on("/zone/delete", HTTP_POST, handleZoneDelete);
   webServer.on("/capture/start", HTTP_POST, handleCaptureStart);
   webServer.on("/capture/save", HTTP_POST, handleCaptureSave);
   webServer.on("/send", HTTP_POST, handleSend);
@@ -1217,6 +1645,7 @@ void setup() {
   mqttPassword = preferences.getString("mpass", "");
   mqttBase = preferences.getString("mbase", String("cc1101/") + bridgeId);
   loadSignals();
+  loadZones();
 
   ccStrobe(CC_SRES);
   delay(5);
