@@ -31,7 +31,7 @@ constexpr uint8_t MAX_CAPTURE_HISTORY = 2;
 constexpr uint32_t MQTT_BUFFER_SIZE = 768;
 constexpr uint32_t CAPTURE_CARRIER_HOLD_US = 20000;
 constexpr uint8_t DEFAULT_LNA_GAIN_REDUCTION_STEP = 3;
-char hostname[16];
+char hostname[32];
 char bridgeId[7];
 constexpr char AP_NAME[] = "CC1101-Setup";
 constexpr char MQTT_DISCOVERY_PREFIX[] = "homeassistant";
@@ -118,6 +118,8 @@ String mqttBase;
 uint16_t mqttPort = 1883;
 bool webStarted = false;
 bool otaStarted = false;
+bool wifiHostnameSet = false;
+bool mdnsStarted = false;
 uint32_t lastMqttAttempt = 0;
 int lastMqttFailureState = -1;
 float activeFrequencyMHz = 433.92f;
@@ -688,8 +690,8 @@ void sendSignal(const String& zone, const String& id) {
     ccStrobe(CC_SIDLE);
     pinMode(PIN_CC_GDO0, INPUT);
     ccStrobe(CC_SRX);
-    lastAction = "Sent: " + String(signal.label);
-    logEvent("Sent: " + String(signal.label));
+    lastAction = "Sent: " + String(signal.zone) + "/" + String(signal.label);
+    logEvent(lastAction);
     return;
   }
   lastAction = "Signal not found: " + signalIdentity(zone, id);
@@ -745,8 +747,22 @@ String pageStart(const String& title) {
   return String("<!doctype html><html lang='en'><meta charset='utf-8'>") +
     "<meta name='viewport' content='width=device-width,initial-scale=1'><title>" + htmlEscape(title) +
     " · CC1101</title><style>body{font:16px system-ui,sans-serif;max-width:900px;margin:0 auto;padding:18px;"
-    "background:#101820;color:#e8eff2}nav{display:flex;gap:16px;padding:12px 0;border-bottom:1px solid #52616b}"
-    "a{color:#71d6c5}main{padding-top:16px}.panel{padding:14px 0;border-bottom:1px solid #394952}"
+    "background:#101820;color:#e8eff2}header{padding:10px 0 12px;border-bottom:1px solid #52616b}.brand{display:block;font-weight:700;margin-bottom:10px}"
+    "nav{display:flex;align-items:center;flex-wrap:nowrap;overflow-x:auto;gap:8px;padding:0 0 4px;white-space:nowrap;scrollbar-width:thin}"
+    "a{color:#71d6c5}nav a{display:inline-block;padding:8px 12px;border-radius:4px;background:#71d6c5;color:#102126;text-decoration:none}"
+    "nav a:hover{background:#8be3d4}.danger-button{background:#d85a56;color:#fff}.danger-button:hover{background:#e6726d}"
+    ".signal-actions button{height:36px;box-sizing:border-box}"
+    ".signal-actions .send-signal,.signal-actions .record-signal{display:inline-flex;align-items:center;justify-content:center;"
+    "width:40px;height:36px;box-sizing:border-box;padding:0;background:#71d6c5;color:#102126;border:0;line-height:1}"
+    ".action-icon{display:block;position:relative;top:-1px;line-height:1}"
+    ".record-icon{font-size:28px;color:#d9363e}"
+    ".signal-actions .send-signal:hover,.signal-actions .record-signal:hover{background:#8be3d4}"
+    "main{padding-top:16px}.panel{padding:14px 0;border-bottom:1px solid #394952}"
+    ".signal-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0}"
+    ".signal-info{min-width:0;flex:1}.signal-info h3{display:inline;margin:0 8px 0 0;font-size:1em}"
+    ".signal-info p{display:inline;margin:0;font-size:.88em}.signal-actions{display:flex;gap:4px;flex-shrink:0}"
+    ".signal-actions form{margin:0}.signal-actions button{padding:6px 10px;margin:0}"
+    "@media(max-width:560px){.signal-row{flex-wrap:wrap}.signal-info{flex-basis:100%}.signal-actions{margin-left:auto}}"
     "input{font:inherit;max-width:100%;box-sizing:border-box}"
     "input:not([type=range]):not([type=hidden]):not([type=file]),select,textarea{font:inherit;"
     "color:#e8eff2;background:#18242c;border:1px solid #52616b;border-radius:4px;box-sizing:border-box;color-scheme:dark}"
@@ -756,7 +772,7 @@ String pageStart(const String& title) {
     "margin:4px 4px 4px 0;border:0;"
     "border-radius:4px;background:#71d6c5;color:#102126;text-decoration:none;cursor:pointer}"
     "button:hover,.button-link:hover,input[type=file]::file-selector-button:hover{background:#8be3d4}"
-    "small,.muted{color:#a7b5bc}"
+    "small,.muted{color:#a7b5bc}.page-footer{margin-top:24px}"
     "form{margin:8px 0}.row{display:flex;gap:8px;flex-wrap:wrap}.row label{display:block}"
     ".setup-form{max-width:680px}.setup-section{padding:14px 0;border-bottom:1px solid #394952}"
     ".setup-section h2{font-size:1.1em;margin:0 0 12px}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:12px 16px}"
@@ -768,7 +784,7 @@ String pageStart(const String& title) {
     ".form-actions{padding-top:14px}"
     ".file-picker{display:flex;align-items:center;gap:8px;flex-wrap:wrap}"
     ".file-picker span{color:#a7b5bc;overflow-wrap:anywhere}"
-    ".recorder{max-width:760px}.recorder-step{padding:12px 0;border-bottom:1px solid #394952}"
+    ".recorder-step{padding:12px 0;border-bottom:1px solid #394952}"
     ".recorder-step h3{font-size:1em;margin:0 0 10px;color:#71d6c5}.capture-state{padding:10px 12px;margin-top:10px;"
     "background:#18242c;border-left:3px solid #71d6c5;min-height:22px}.capture-state.warn{border-color:#e6ae61}"
     ".pulse-preview{margin-top:10px;padding:10px;background:#18242c}.pulse-waveform{display:block;width:100%;height:120px;background:#101820}"
@@ -776,18 +792,58 @@ String pageStart(const String& title) {
     ".log-list{max-height:360px;overflow:auto;background:#101820;border:1px solid #394952;padding:8px 12px;font:13px ui-monospace,monospace}"
     ".log-entry{padding:4px 0;border-bottom:1px solid #26343c;overflow-wrap:anywhere}.log-entry:last-child{border:0}"
     "button:disabled{opacity:.45;cursor:not-allowed}"
-    "code{overflow-wrap:anywhere}</style><nav><b>CC1101 Bridge</b><a href='/'>Signals</a>"
-    "<a href='/settings'>Network</a><a href='/firmware'>Firmware</a><a href='/restart'>Restart</a></nav><main>";
+    "code{overflow-wrap:anywhere}</style><header><b class='brand'>" + String(hostname) + "</b><nav><a href='/'>Home</a><a href='/signals'>Signals</a>"
+    "<a href='/log'>Log</a><a href='/zones'>Zones</a><a href='/backup'>Backup</a><a href='/settings'>Network</a>"
+    "<a href='/firmware'>Firmware</a><a href='/system'>System</a></nav></header><main>";
 }
 
 String pageEnd() {
   return "</main></html>";
 }
 
+void handleZonesPage() {
+  const String body = "<h1>Zone configuration</h1><section class='panel'><h2>Zones</h2>" + renderZoneList() +
+    "<form method='post' action='/zone/create' class='row'>"
+    "<label>New zone <input name='zone' maxlength='15' pattern='[a-z0-9]+(_+[a-z0-9]+)*'"
+    " title='1-15 lowercase letters or digits, with underscores between characters' required></label>"
+    "<button>Create zone</button></form></section>";
+  webServer.send(200, "text/html; charset=utf-8", pageStart("Zones") + body + pageEnd());
+}
+
+void handleBackupPage() {
+  const String body = "<h1>Signal backup</h1><section class='panel'><h2>Back up / transfer signals</h2><div class='row'>"
+  "<a class='button-link' href='/signals/export' download>Export JSON</a>"
+  "<div class='file-picker'><button id='signal-file-select' type='button' aria-controls='signal-import-file'>Choose file</button>"
+  "<span id='signal-import-file-name' aria-live='polite'>No file selected</span>"
+  "<input id='signal-import-file' type='file' accept='.json,application/json' hidden></div>"
+  "<button id='signal-import-button' type='button'>Import</button></div>"
+  "<p id='signal-import-state' class='muted' aria-live='polite'></p></section>"
+  "<script>const signalFileInput=document.getElementById('signal-import-file');"
+  "document.getElementById('signal-file-select').addEventListener('click',()=>signalFileInput.click());"
+  "signalFileInput.addEventListener('change',()=>{document.getElementById('signal-import-file-name').textContent="
+  "signalFileInput.files.length?signalFileInput.files[0].name:'No file selected';});"
+  "document.getElementById('signal-import-button').addEventListener('click',async()=>{"
+  "const state=document.getElementById('signal-import-state');"
+  "if(!signalFileInput.files.length){state.textContent='Select a JSON file first';return;}"
+  "const button=document.getElementById('signal-import-button');button.disabled=true;"
+  "try{const backup=JSON.parse(await signalFileInput.files[0].text());"
+  "if(backup.format!=='cc1101-signals'||backup.version!==1||!Array.isArray(backup.signals))"
+  "throw new Error('Unsupported file format or version');"
+  "let imported=0;for(const signal of backup.signals){const response=await fetch('/signal/import',{method:'POST',"
+  "headers:{'Content-Type':'application/json'},body:JSON.stringify(signal)});"
+  "if(!response.ok)throw new Error((await response.text())+' ('+imported+' of '+backup.signals.length+' imported)');"
+  "imported++;state.textContent='Imported: '+imported+' of '+backup.signals.length;}"
+  "state.textContent='Import complete: '+imported+' signals';location.reload();}"
+  "catch(error){state.textContent='Import failed: '+error.message;}finally{button.disabled=false;}});</script>";
+  webServer.send(200, "text/html; charset=utf-8", pageStart("Backup") + body + pageEnd());
+}
+
 String settingsForm(bool firstSetup) {
   const String intro = firstSetup
     ? "<h1>Set up Wi-Fi</h1><p>Connect to the <b>" + String(AP_NAME) +
       "</b> access point (password: <code>cc1101setup</code>). MQTT can be configured later.</p>"
+      "<p>After saving, the bridge restarts. Reconnect to your Wi-Fi and open <code>http://" +
+      String(hostname) + ".local/</code>. If that name does not resolve, use the IP shown in your router.</p>"
     : "<h1>Network / MQTT</h1>";
   const String wifiName = firstSetup ? "" : htmlEscape(wifiSsid);
   const String wifiPasswordHint = firstSetup ? "" : " placeholder='blank = unchanged'";
@@ -808,20 +864,36 @@ String settingsForm(bool firstSetup) {
     (firstSetup ? "" : "<p class='muted'>Leave password fields blank to keep the saved passwords.</p>");
 }
 
-String renderSignalList() {
-  String body;
-  if (signals.empty()) body += "<p class='muted'>No signals saved yet.</p>";
-  for (const StoredSignal& signal : signals) {
-    body += "<section class='panel'><h3>" + htmlEscape(signal.label) + "</h3><p class='muted'>" +
-      htmlEscape(signal.zone) + " · " + htmlEscape(signal.id) + " · " +
-      String(signal.frequencyMHz, 2) + " MHz · " + String(signal.count) + " pulses</p><div class='row'><form method='get' action='/signal'>" +
-      "<input type='hidden' name='id' value='" + htmlEscape(signalIdentity(signal.zone, signal.id)) + "'><button>Edit</button></form>"
-      "<form method='post' action='/send'>" +
-      "<input type='hidden' name='id' value='" + htmlEscape(signalIdentity(signal.zone, signal.id)) + "'><button>Send</button></form>" +
-      "<form method='post' action='/delete' onsubmit=\"return confirm('Delete signal?')\">" +
-      "<input type='hidden' name='id' value='" + htmlEscape(signalIdentity(signal.zone, signal.id)) + "'><button>Delete</button></form></div></section>";
+String renderSignalRow(const StoredSignal& signal) {
+  return "<section class='panel signal-row'><div class='signal-info'><h3>" + htmlEscape(signal.label) + "</h3><p class='muted'>" +
+    htmlEscape(signal.zone) + " · " + htmlEscape(signal.id) + " · " +
+    String(signal.frequencyMHz, 2) + " MHz · " + String(signal.count) + " pulses</p></div><div class='signal-actions'>"
+    "<form method='post' action='/send' class='send-form'>"
+    "<input type='hidden' name='id' value='" + htmlEscape(signalIdentity(signal.zone, signal.id)) + "'><button class='send-signal' aria-label='Send signal' title='Send signal'>&#9654;</button></form>"
+    "<button type='button' class='record-signal' aria-label='Re-record signal' title='Re-record signal' data-zone='" +
+    htmlEscape(signal.zone) + "' data-id='" + htmlEscape(signal.id) + "' data-frequency='" + String(signal.frequencyMHz, 2) + "'><span class='action-icon record-icon' aria-hidden='true'>●</span></button>"
+    "<form method='get' action='/signal'>" +
+    "<input type='hidden' name='id' value='" + htmlEscape(signalIdentity(signal.zone, signal.id)) + "'><button>Edit</button></form>" +
+    "<form method='post' action='/delete' onsubmit=\"return confirm('Delete signal?')\">" +
+    "<input type='hidden' name='id' value='" + htmlEscape(signalIdentity(signal.zone, signal.id)) + "'><button class='danger-button'>Delete</button></form></div></section>";
+}
+
+void sendSignalList() {
+  if (signals.empty()) {
+    webServer.sendContent("<p class='muted'>No signals saved yet.</p>");
+    return;
   }
-  return body;
+  for (const String& zone : zones) {
+    bool hasSignals = false;
+    for (const StoredSignal& signal : signals) {
+      if (zone != signal.zone) continue;
+      if (!hasSignals) {
+        webServer.sendContent("<h2 class='zone-heading'>" + htmlEscape(zone) + "</h2>");
+        hasSignals = true;
+      }
+      webServer.sendContent(renderSignalRow(signal));
+    }
+  }
 }
 
 void handleSignalsExport() {
@@ -856,7 +928,7 @@ String renderSignalEditor(const String& identity) {
   String zone;
   String id;
   if (!parseSignalIdentity(identity, zone, id)) {
-    return pageStart("Signal not found") + "<h1>Signal not found</h1><p><a href='/'>Back</a></p>" + pageEnd();
+    return pageStart("Signal not found") + "<h1>Signal not found</h1><p><a href='/signals'>Back</a></p>" + pageEnd();
   }
   for (const StoredSignal& signal : signals) {
     if (zone != signal.zone || id != signal.id) continue;
@@ -882,10 +954,10 @@ String renderSignalEditor(const String& identity) {
       "<textarea name='pulse_data' rows='18' spellcheck='false' required style='display:block;width:100%;box-sizing:border-box;"
       "background:#18242c;color:#e8eff2;border:1px solid #52616b;padding:10px;font:13px ui-monospace,monospace'>" +
       htmlEscape(pulseData) + "</textarea></label></section>"
-      "<div class='form-actions'><button>Save changes</button> <a href='/'>Cancel</a></div></form>";
+      "<div class='form-actions'><button>Save changes</button> <a href='/signals'>Cancel</a></div></form>";
     return pageStart("Edit signal") + body + pageEnd();
   }
-  return pageStart("Signal not found") + "<h1>Signal not found</h1><p><a href='/'>Back</a></p>" + pageEnd();
+  return pageStart("Signal not found") + "<h1>Signal not found</h1><p><a href='/signals'>Back</a></p>" + pageEnd();
 }
 
 void handleSignalImport() {
@@ -989,11 +1061,31 @@ void handleRoot() {
     return;
   }
 
-  String body = "<h1>Signal manager</h1><section class='panel'><h2>Zones</h2>" + renderZoneList() +
-    "<form method='post' action='/zone/create' class='row'>"
-    "<label>New zone <input name='zone' maxlength='15' pattern='[a-z0-9]+(_+[a-z0-9]+)*'"
-    " title='1-15 lowercase letters or digits, with underscores between characters' required></label>"
-    "<button>Create zone</button></form></section><section class='panel recorder'><h2>Signal recorder</h2>"
+  const String mqttStatus = mqttHost.isEmpty() ? "Not configured" :
+    (mqttClient.connected() ? "Connected" : "Disconnected");
+  const String body = "<h1>Welcome to the CC1101 Bridge</h1>"
+    "<p class='muted'>Record, organize and replay your saved radio signals.</p>"
+    "<section class='panel'><div class='row' style='align-items:center;justify-content:space-between'>"
+    "<h2>Bridge status</h2><button type='button' onclick='location.reload()' title='Refresh bridge status'>Refresh</button></div><p>Wi-Fi: Connected · " +
+    htmlEscape(WiFi.localIP().toString()) + "</p><p>MQTT: " + mqttStatus +
+    "</p><p>Saved signals: " + String(signals.size()) + " / " + String(MAX_SIGNALS) +
+    "</p><p>CC1101: " + String(cc1101Detected ? "Detected" : "Not detected") +
+    "</p></section><footer class='page-footer muted'>Author: Evohl · "
+    "<a href='https://github.com/Evohl/esp32-cc1101-signal-bridge' target='_blank' rel='noopener noreferrer'>GitHub</a> · "
+    "<a href='https://github.com/Evohl/esp32-cc1101-signal-bridge/blob/main/LICENSE' target='_blank' rel='noopener noreferrer'>MIT License</a></footer>";
+  webServer.send(200, "text/html; charset=utf-8", pageStart("Home") + body + pageEnd());
+}
+
+void handleSignalsPage() {
+  if (WiFi.status() != WL_CONNECTED) {
+    const String body = settingsForm(true);
+    webServer.send(200, "text/html; charset=utf-8", pageStart("Wi-Fi setup") + body + pageEnd());
+    return;
+  }
+
+  const String requestedZone = webServer.arg("zone");
+  const String selectedZone = zoneExists(requestedZone) ? requestedZone : "office";
+  String beforeSignals = "<h1>Signal manager</h1><section class='panel recorder'><h2>Signal recorder</h2>"
     "<div class='recorder-step'><h3>1. Capture a signal</h3>"
     "<form method='post' action='/capture/start' class='form-grid' id='capture-form'>"
     "<label>Frequency (MHz)<input type='number' name='frequency' min='300' max='928' step='0.01' value='433.92' required></label>"
@@ -1005,20 +1097,13 @@ void handleRoot() {
     "<p id='pulse-summary' class='muted'>The waveform will appear here after capture.</p>"
     "<details><summary>First 120 pulse durations</summary><p id='pulse-values' class='pulse-values'></p></details></div></div>"
     "<div class='recorder-step'><h3>2. Name and save the signal</h3>"
-    "<form method='post' action='/capture/save' class='row'>"
-    "<label>Zone <select name='zone' required>" + renderZoneOptions("office") + "</select></label>"
+    "<form method='post' action='/capture/save' class='row' id='capture-save-form'>"
+    "<label>Zone <select id='recorder-zone' name='zone' required>" + renderZoneOptions(selectedZone) + "</select></label>"
     "<label>Signal name <input name='name' maxlength='15' pattern='[a-z0-9]+(_+[a-z0-9]+)*'"
     " autocapitalize='none' spellcheck='false' title='1-15 lowercase letters or digits, with underscores between characters' required></label>"
-    "<button id='save-button' disabled>Save signal</button></form></div></section>" +
-    "<section class='panel'><h2>Back up / transfer signals</h2><div class='row'>"
-    "<a class='button-link' href='/signals/export' download>Export JSON</a>"
-    "<div class='file-picker'><button id='signal-file-select' type='button' aria-controls='signal-import-file'>Choose file</button>"
-    "<span id='signal-import-file-name' aria-live='polite'>No file selected</span>"
-    "<input id='signal-import-file' type='file' accept='.json,application/json' hidden></div>"
-    "<button id='signal-import-button' type='button'>Import</button></div>"
-    "<p id='signal-import-state' class='muted' aria-live='polite'></p></section>" + renderSignalList() +
-    "<section class='panel'><h2>Recent events</h2><p id='device-stats' class='muted'></p>"
-    "<div id='event-log' class='log-list' aria-live='polite'>No events yet</div></section>" +
+    "<input type='hidden' id='recorder-replace' name='replace' value=''><button id='save-button' disabled>Save signal</button></form></div></section>"
+    "<h2>Recorded signals</h2>";
+  const String afterSignals = "<p id='device-stats' class='muted'></p>"
     "<script>let shownCaptureId=-1;async function loadPulsePreview(){try{const response=await fetch('/api/pulses',{cache:'no-store'});"
     "if(!response.ok)return;const data=await response.json();const durations=data.durations;const levels=data.levels;"
     "if(!durations.length||durations.length!==levels.length)return;const canvas=document.getElementById('pulse-waveform');"
@@ -1043,11 +1128,9 @@ void handleRoot() {
     "state.classList.toggle('warn',!data.pulses&&!data.capture);const captureButton=document.getElementById('capture-button');"
     "captureButton.disabled=data.capture;captureButton.textContent=data.capture?'Capturing...':'Start capture';"
     "document.getElementById('save-button').disabled=data.capture||data.pulses<4;"
-    "document.getElementById('device-stats').textContent='RSSI '+(data.rssi_dbm===undefined?'--':data.rssi_dbm.toFixed(1)+' dBm')+' · Log '+data.log_entries+'/'+data.log_capacity+' · Signals '+data.signals;"
+    "document.getElementById('device-stats').textContent='RSSI '+(data.rssi_dbm===undefined?'--':data.rssi_dbm.toFixed(1)+' dBm')+' · Signals '+data.signals;"
     "if(!data.capture&&data.pulses>0&&data.capture_id!==shownCaptureId){shownCaptureId=data.capture_id;loadPulsePreview();}"
-    "const log=document.getElementById('event-log');log.replaceChildren();if(!data.log.length){log.textContent='No events yet';return;}"
-    "for(let i=data.log.length-1;i>=0;i--){const item=document.createElement('div');item.className='log-entry';"
-    "item.textContent=(data.log[i].seconds.toFixed(1)+' s · '+data.log[i].message);log.append(item);}}catch(error){}}"
+    "}catch(error){}}"
     "document.getElementById('capture-form').addEventListener('submit',async(event)=>{event.preventDefault();"
     "const form=event.currentTarget;const button=document.getElementById('capture-button');const state=document.getElementById('capture-state');"
     "button.disabled=true;button.textContent='Starting capture...';state.textContent='Starting capture';"
@@ -1056,28 +1139,68 @@ void handleRoot() {
     "if(!response.ok)throw new Error(await response.text());await refreshStatus();}catch(error){button.disabled=false;"
     "button.textContent='Start capture';state.textContent=error.message;state.classList.add('warn');}});"
     "const strengthInput=document.querySelector('#capture-form input[name=strength]');"
+    "const recorderZone=document.getElementById('recorder-zone');"
+    "const savedZone=localStorage.getItem('cc1101-recorder-zone');"
+    "if([...recorderZone.options].some(option=>option.value===savedZone))recorderZone.value=savedZone;"
+    "const replaceInput=document.getElementById('recorder-replace');const saveButton=document.getElementById('save-button');"
+    "const clearReplacement=()=>{replaceInput.value='';saveButton.textContent='Save signal';};"
+    "const rememberZone=()=>{localStorage.setItem('cc1101-recorder-zone',recorderZone.value);clearReplacement();};"
+    "recorderZone.addEventListener('change',rememberZone);rememberZone();"
+    "const signalNameInput=document.querySelector('#capture-save-form input[name=name]');"
+    "signalNameInput.addEventListener('input',clearReplacement);"
+    "document.querySelectorAll('.record-signal').forEach(button=>button.addEventListener('click',()=>{"
+    "const zone=button.dataset.zone;const id=button.dataset.id;"
+    "recorderZone.value=zone;recorderZone.dispatchEvent(new Event('change'));signalNameInput.value=id;"
+    "replaceInput.value=zone+'/'+id;saveButton.textContent='Replace signal';"
+    "document.getElementById('capture-form').scrollIntoView({behavior:'smooth',block:'center'});"
+    "}));"
     "const gainStepsDb=[0,2.6,6.1,7.4,9.2,11.5,14.6,17.1];"
     "const updateStrengthLabel=()=>{const value=Number(strengthInput.value);document.getElementById('strength-value').value='Level '+value+' (~'+gainStepsDb[value]+' dB)';};"
     "strengthInput.addEventListener('input',updateStrengthLabel);updateStrengthLabel();"
-    "const signalFileInput=document.getElementById('signal-import-file');"
-    "document.getElementById('signal-file-select').addEventListener('click',()=>signalFileInput.click());"
-    "signalFileInput.addEventListener('change',()=>{document.getElementById('signal-import-file-name').textContent="
-    "signalFileInput.files.length?signalFileInput.files[0].name:'No file selected';});"
-    "document.getElementById('signal-import-button').addEventListener('click',async()=>{"
-    "const input=signalFileInput;const state=document.getElementById('signal-import-state');"
-    "if(!input.files.length){state.textContent='Select a JSON file first';return;}"
-    "const button=document.getElementById('signal-import-button');button.disabled=true;"
-    "try{const backup=JSON.parse(await input.files[0].text());"
-    "if(backup.format!=='cc1101-signals'||backup.version!==1||!Array.isArray(backup.signals))"
-    "throw new Error('Unsupported file format or version');"
-    "let imported=0;for(const signal of backup.signals){const response=await fetch('/signal/import',{method:'POST',"
-    "headers:{'Content-Type':'application/json'},body:JSON.stringify(signal)});"
-    "if(!response.ok)throw new Error((await response.text())+' ('+imported+' of '+backup.signals.length+' imported)');"
-    "imported++;state.textContent='Imported: '+imported+' of '+backup.signals.length;}"
-    "state.textContent='Import complete: '+imported+' signals';location.reload();}"
-    "catch(error){state.textContent='Import failed: '+error.message;}finally{button.disabled=false;}});"
+    "document.querySelectorAll('.send-form').forEach(form=>form.addEventListener('submit',async(event)=>{event.preventDefault();"
+    "const button=form.querySelector('button');const originalText=button.textContent;button.disabled=true;button.textContent='Sending...';"
+    "try{const response=await fetch(form.action,{method:'POST',headers:{'X-Requested-With':'fetch'},"
+    "body:new URLSearchParams(new FormData(form))});if(!response.ok)throw new Error(await response.text());await refreshStatus();}"
+    "catch(error){button.title=error.message;}finally{button.disabled=false;button.textContent=originalText;}}));"
     "refreshStatus();setInterval(refreshStatus,1000);</script>";
-  webServer.send(200, "text/html; charset=utf-8", pageStart("Signals") + body + pageEnd());
+  const String start = pageStart("Signals");
+  const String end = pageEnd();
+  if (!beforeSignals.startsWith("<h1>Signal manager</h1>") ||
+      !beforeSignals.endsWith("<h2>Recorded signals</h2>") || !afterSignals.startsWith("<p id='device-stats'") ||
+      !afterSignals.endsWith("</script>")) {
+    Serial.printf("[web] /signals static section incomplete: before=%u after=%u heap=%u\n",
+                  (unsigned)beforeSignals.length(), (unsigned)afterSignals.length(),
+                  (unsigned)ESP.getFreeHeap());
+    webServer.send(500, "text/plain; charset=utf-8", "The ESP could not build the complete signals page.");
+    return;
+  }
+  Serial.printf("[web] /signals stream start: signals=%u static=%u heap=%u\n",
+                (unsigned)signals.size(), (unsigned)(start.length() + beforeSignals.length() +
+                afterSignals.length() + end.length()), (unsigned)ESP.getFreeHeap());
+  webServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  webServer.send(200, "text/html; charset=utf-8", "");
+  webServer.sendContent(start);
+  webServer.sendContent(beforeSignals);
+  sendSignalList();
+  webServer.sendContent(afterSignals);
+  webServer.sendContent(end);
+  webServer.sendContent("");
+  Serial.printf("[web] /signals stream complete: signals=%u heap=%u\n",
+                (unsigned)signals.size(), (unsigned)ESP.getFreeHeap());
+}
+
+void handleLogPage() {
+  const String body = "<h1>Event log</h1><p class='muted'>Recent bridge activity</p>"
+    "<button id='refresh-log' type='button'>Refresh</button>"
+    "<div id='event-log' class='log-list' aria-live='polite'>Loading...</div>"
+    "<script>async function refreshLog(){try{const response=await fetch('/api/log',{cache:'no-store'});"
+    "if(!response.ok)throw new Error('Could not load event log');const data=await response.json();"
+    "const log=document.getElementById('event-log');log.replaceChildren();if(!data.log.length){log.textContent='No events yet';return;}"
+    "for(let i=data.log.length-1;i>=0;i--){const item=document.createElement('div');item.className='log-entry';"
+    "item.textContent=data.log[i].seconds.toFixed(1)+' s · '+data.log[i].message;log.append(item);}}catch(error){"
+    "document.getElementById('event-log').textContent=error.message;}}"
+    "document.getElementById('refresh-log').addEventListener('click',refreshLog);refreshLog();setInterval(refreshLog,5000);</script>";
+  webServer.send(200, "text/html; charset=utf-8", pageStart("Event log") + body + pageEnd());
 }
 
 void handleCaptureStart() {
@@ -1088,7 +1211,7 @@ void handleCaptureStart() {
   if (captureActive) {
     logEvent("Capture start rejected: capture already in progress");
     if (isAjax) { webServer.send(204); return; }
-    webServer.sendHeader("Location", "/");
+    webServer.sendHeader("Location", "/signals");
     webServer.send(303);
     return;
   }
@@ -1121,7 +1244,7 @@ void handleCaptureStart() {
   lastAction = "Capture in progress";
   logEvent("Capture started: " + String(frequency, 2) + " MHz, " + String(seconds) + " s, noise reduction level " + String(captureGainReductionStep));
   if (isAjax) { webServer.send(204); return; }
-  webServer.sendHeader("Location", "/");
+  webServer.sendHeader("Location", "/signals");
   webServer.send(303);
 }
 
@@ -1145,7 +1268,7 @@ void handleZoneCreate() {
     return;
   }
   logEvent("Zone created: " + zone);
-  webServer.sendHeader("Location", "/");
+  webServer.sendHeader("Location", "/zones");
   webServer.send(303);
 }
 
@@ -1175,7 +1298,7 @@ void handleZoneDelete() {
     return;
   }
   logEvent("Zone deleted: " + zone);
-  webServer.sendHeader("Location", "/");
+  webServer.sendHeader("Location", "/zones");
   webServer.send(303);
 }
 
@@ -1195,13 +1318,11 @@ void handleCaptureSave() {
   const String id = webServer.arg("name");
   const String zone = webServer.arg("zone").isEmpty() ? "unassigned" : webServer.arg("zone");
   const String label = id;
+  const String replaceIdentity = webServer.arg("replace");
+  size_t replaceIndex = signals.size();
   if (label.isEmpty() || captureCount < 4) {
     logEvent("Not saved: fewer than 4 pulses or missing signal ID");
     webServer.send(400, "text/plain", "A signal ID is required and the capture must contain at least four pulses.");
-    return;
-  }
-  if (signals.size() >= MAX_SIGNALS) {
-    webServer.send(400, "text/plain", "Maximum number of saved signals reached.");
     return;
   }
   if (!validSignalId(zone) || !validSignalId(id)) {
@@ -1212,13 +1333,37 @@ void handleCaptureSave() {
     webServer.send(400, "text/plain", "Create the zone before saving a signal.");
     return;
   }
-  for (const StoredSignal& existing : signals) {
-    if (zone == existing.zone && id == existing.id) {
+  if (!replaceIdentity.isEmpty()) {
+    String replaceZone;
+    String replaceId;
+    if (!parseSignalIdentity(replaceIdentity, replaceZone, replaceId) || replaceZone != zone || replaceId != id) {
+      webServer.send(400, "text/plain", "Replacement target must match the selected zone and signal name.");
+      return;
+    }
+    for (size_t index = 0; index < signals.size(); index++) {
+      if (zone == signals[index].zone && id == signals[index].id) {
+        replaceIndex = index;
+        break;
+      }
+    }
+    if (replaceIndex == signals.size()) {
+      webServer.send(404, "text/plain", "Signal selected for replacement no longer exists.");
+      return;
+    }
+  }
+  const bool replacing = replaceIndex < signals.size();
+  if (!replacing && signals.size() >= MAX_SIGNALS) {
+    webServer.send(400, "text/plain", "Maximum number of saved signals reached.");
+    return;
+  }
+  for (size_t index = 0; index < signals.size(); index++) {
+    const StoredSignal& existing = signals[index];
+    if (index != replaceIndex && zone == existing.zone && id == existing.id) {
       webServer.send(409, "text/plain", "This signal ID is already in use.");
       return;
     }
   }
-  if (!signalKeyAvailable(zone, id)) {
+  if (!signalKeyAvailable(zone, id, replaceIndex)) {
     webServer.send(409, "text/plain", "Zone/name storage key collision; choose a different name.");
     return;
   }
@@ -1235,42 +1380,65 @@ void handleCaptureSave() {
   }
   interrupts();
 
-  for (const StoredSignal& existing : signals) {
+  for (size_t index = 0; index < signals.size(); index++) {
+    if (index == replaceIndex) continue;
+    const StoredSignal& existing = signals[index];
     if (!sameSignal(existing, signal)) continue;
     lastAction = "Duplicate not saved: " + label;
     logEvent(lastAction);
-    webServer.sendHeader("Location", "/");
+    webServer.sendHeader("Location", "/signals?zone=" + zone);
     webServer.send(303);
     return;
   }
   const String key = signalKey(zone, id);
+  const StoredSignal previous = replacing ? signals[replaceIndex] : StoredSignal{};
   if (preferences.putBytes(key.c_str(), &signal, sizeof(signal)) != sizeof(signal)) {
     lastAction = "Save failed: NVS full or write error";
     logEvent(lastAction);
     webServer.send(500, "text/plain", lastAction);
     return;
   }
-  signals.push_back(signal);
+  if (replacing) signals[replaceIndex] = signal;
+  else signals.push_back(signal);
   if (!saveSignalIndex()) {
-    signals.pop_back();
-    preferences.remove(key.c_str());
+    if (replacing) {
+      signals[replaceIndex] = previous;
+      preferences.putBytes(key.c_str(), &previous, sizeof(previous));
+    } else {
+      signals.pop_back();
+      preferences.remove(key.c_str());
+    }
     lastAction = "Save failed: could not write signal index";
     logEvent(lastAction);
     webServer.send(500, "text/plain", lastAction);
     return;
   }
   publishDiscovery(signal);
-  lastAction = "Saved: " + label;
-  logEvent("Signal saved: " + label + " (" + String(signal.count) + " pulses)");
-  webServer.sendHeader("Location", "/");
+  lastAction = String(replacing ? "Re-recorded: " : "Saved: ") + zone + "/" + label;
+  logEvent(lastAction + " (" + String(signal.count) + " pulses)");
+  webServer.sendHeader("Location", "/signals?zone=" + zone);
   webServer.send(303);
 }
 
 void handleSend() {
+  const bool isAjax = webServer.hasHeader("X-Requested-With");
   String zone;
   String id;
-  if (parseSignalIdentity(webServer.arg("id"), zone, id)) sendSignal(zone, id);
-  webServer.sendHeader("Location", "/");
+  if (!parseSignalIdentity(webServer.arg("id"), zone, id)) {
+    if (isAjax) {
+      webServer.send(400, "text/plain", "Invalid signal identity.");
+      return;
+    }
+    webServer.sendHeader("Location", "/signals");
+    webServer.send(303);
+    return;
+  }
+  sendSignal(zone, id);
+  if (isAjax) {
+    webServer.send(204);
+    return;
+  }
+  webServer.sendHeader("Location", "/signals");
   webServer.send(303);
 }
 
@@ -1393,7 +1561,7 @@ void handleSignalSave() {
   publishDiscovery(updated);
   lastAction = "Signal updated: " + newId;
   logEvent(lastAction);
-  webServer.sendHeader("Location", "/");
+  webServer.sendHeader("Location", "/signals");
   webServer.send(303);
 }
 
@@ -1401,7 +1569,7 @@ void handleDelete() {
   String zone;
   String id;
   if (!parseSignalIdentity(webServer.arg("id"), zone, id)) {
-    webServer.sendHeader("Location", "/");
+    webServer.sendHeader("Location", "/signals");
     webServer.send(303);
     return;
   }
@@ -1427,7 +1595,7 @@ void handleDelete() {
     saveSignalIndex();
     break;
   }
-  webServer.sendHeader("Location", "/");
+  webServer.sendHeader("Location", "/signals");
   webServer.send(303);
 }
 
@@ -1436,8 +1604,6 @@ void handleApiStatus() {
   document["capture"] = captureActive;
   document["pulses"] = captureCount;
   document["capture_id"] = captureSequence;
-  document["log_entries"] = eventLogCount;
-  document["log_capacity"] = MAX_LOG_ENTRIES;
   document["signals"] = signals.size();
   document["mqtt"] = mqttClient.connected();
   document["gdo0"] = digitalRead(PIN_CC_GDO0) == HIGH;
@@ -1450,6 +1616,13 @@ void handleApiStatus() {
   document["cc1101"] = cc1101Detected;
   document["partnum"] = cc1101PartNumber;
   document["version"] = cc1101Version;
+  String json;
+  serializeJson(document, json);
+  webServer.send(200, "application/json", json);
+}
+
+void handleApiLog() {
+  JsonDocument document;
   JsonArray entries = document["log"].to<JsonArray>();
   const uint8_t first = (eventLogNext + MAX_LOG_ENTRIES - eventLogCount) % MAX_LOG_ENTRIES;
   for (uint8_t index = 0; index < eventLogCount; index++) {
@@ -1526,6 +1699,53 @@ void handleFirmwarePage() {
   webServer.send(200, "text/html; charset=utf-8", pageStart("Firmware") + body + pageEnd());
 }
 
+void handleSystemPage() {
+  const String ccStatus = cc1101Detected ? "Detected" : "Not detected";
+  const String ccPart = cc1101PartNumber == 0xFF ? "Unavailable" : "0x" + String(cc1101PartNumber, HEX);
+  const String ccVersion = cc1101Version == 0xFF ? "Unavailable" : "0x" + String(cc1101Version, HEX);
+  const String body = "<h1>System</h1><section class='panel'><h2>ESP32</h2>"
+    "<p>Host: " + htmlEscape(String(hostname)) + ".local</p><p>DHCP hostname: " +
+    String(wifiHostnameSet ? "Applied" : "Not applied") + "</p><p>mDNS: " +
+    String(mdnsStarted ? "Started" : "Failed to start") + "</p><p>Chip: " + String(ESP.getChipModel()) +
+    " revision " + String(ESP.getChipRevision()) + " · CPU " + String(ESP.getCpuFreqMHz()) + " MHz</p>"
+    "<p>ESP-IDF: " + String(ESP.getSdkVersion()) + "</p><p>Free heap: " +
+    String(ESP.getFreeHeap() / 1024) + " / " + String(ESP.getHeapSize() / 1024) + " KiB</p>"
+    "<p>Flash: " + String(ESP.getFlashChipSize() / 1024) + " KiB · Free app space: " +
+    String(ESP.getFreeSketchSpace() / 1024) + " KiB</p></section>"
+    "<section class='panel'><h2>CC1101</h2><p>Status: " + ccStatus + "</p><p>Part number: " +
+    ccPart + " · Version: " + ccVersion + "</p></section>"
+    "<section class='panel'><h2>Restart</h2><form method='post' action='/restart'>"
+    "<button>Restart bridge</button></form></section>"
+    "<section class='panel'><h2>Factory reset</h2><p>This erases Wi-Fi and MQTT settings, zones, and every saved signal.</p>"
+    "<form method='post' action='/factory-reset' onsubmit=\"return confirm('Erase all bridge configuration and saved signals?')\">"
+    "<label>Type RESET to confirm <input name='confirm' pattern='RESET' required autocomplete='off'></label> "
+    "<button class='danger-button'>Erase all configuration</button></form></section>";
+  webServer.send(200, "text/html; charset=utf-8", pageStart("System") + body + pageEnd());
+}
+
+void handleRestart() {
+  webServer.send(200, "text/html; charset=utf-8", pageStart("Restarting") +
+    "<h1>Restarting bridge</h1><p>The device will be back shortly.</p>" + pageEnd());
+  delay(300);
+  ESP.restart();
+}
+
+void handleFactoryReset() {
+  if (webServer.arg("confirm") != "RESET") {
+    webServer.send(400, "text/plain; charset=utf-8", "Type RESET to confirm factory reset.");
+    return;
+  }
+  if (!preferences.clear()) {
+    webServer.send(500, "text/plain; charset=utf-8", "Could not erase bridge configuration.");
+    return;
+  }
+  webServer.send(200, "text/html; charset=utf-8", pageStart("Factory reset") +
+    "<h1>Factory reset complete</h1><p>Restarting into setup mode. Connect to the " +
+    String(AP_NAME) + " Wi-Fi access point.</p>" + pageEnd());
+  delay(500);
+  ESP.restart();
+}
+
 void handleFirmwareUpload() {
   HTTPUpload& upload = webServer.upload();
   if (upload.status == UPLOAD_FILE_START) {
@@ -1551,9 +1771,14 @@ void startWebServer() {
   const char* requestHeaders[] = {"X-Requested-With"};
   webServer.collectHeaders(requestHeaders, 1);
   webServer.on("/", HTTP_GET, handleRoot);
+  webServer.on("/signals", HTTP_GET, handleSignalsPage);
+  webServer.on("/log", HTTP_GET, handleLogPage);
+  webServer.on("/zones", HTTP_GET, handleZonesPage);
+  webServer.on("/backup", HTTP_GET, handleBackupPage);
   webServer.on("/signals/export", HTTP_GET, handleSignalsExport);
   webServer.on("/signal/import", HTTP_POST, handleSignalImport);
   webServer.on("/api/status", HTTP_GET, handleApiStatus);
+  webServer.on("/api/log", HTTP_GET, handleApiLog);
   webServer.on("/api/pulses", HTTP_GET, handleApiPulses);
   webServer.on("/zone/create", HTTP_POST, handleZoneCreate);
   webServer.on("/zone/delete", HTTP_POST, handleZoneDelete);
@@ -1567,11 +1792,13 @@ void startWebServer() {
   webServer.on("/settings", HTTP_POST, handleSettings);
   webServer.on("/firmware", HTTP_GET, handleFirmwarePage);
   webServer.on("/firmware", HTTP_POST, handleFirmwareDone, handleFirmwareUpload);
+  webServer.on("/system", HTTP_GET, handleSystemPage);
   webServer.on("/restart", HTTP_GET, []() {
-    webServer.send(200, "text/plain", "Restarting");
-    delay(300);
-    ESP.restart();
+    webServer.sendHeader("Location", "/system");
+    webServer.send(303);
   });
+  webServer.on("/restart", HTTP_POST, handleRestart);
+  webServer.on("/factory-reset", HTTP_POST, handleFactoryReset);
   webServer.begin();
   webStarted = true;
 }
@@ -1580,7 +1807,11 @@ void startOta() {
   if (otaStarted || WiFi.status() != WL_CONNECTED) return;
   ArduinoOTA.setHostname(hostname);
   ArduinoOTA.begin();
-  MDNS.begin(hostname);
+  mdnsStarted = MDNS.begin(hostname);
+  if (mdnsStarted) MDNS.addService("http", "tcp", 80);
+  logEvent(String("mDNS ") + (mdnsStarted ? "started: " : "failed: ") + hostname + ".local");
+  Serial.printf("[net] mDNS hostname=%s.local started=%s ip=%s\n", hostname,
+                mdnsStarted ? "yes" : "no", WiFi.localIP().toString().c_str());
   otaStarted = true;
 }
 
@@ -1592,8 +1823,11 @@ void connectWifi() {
     startWebServer();
     return;
   }
-  WiFi.mode(WIFI_STA);
-  WiFi.setHostname(hostname);
+  const bool hostnameConfigured = WiFi.setHostname(hostname);
+  const bool stationModeStarted = WiFi.mode(WIFI_STA);
+  wifiHostnameSet = hostnameConfigured && stationModeStarted;
+  Serial.printf("[net] DHCP hostname=%s configured=%s sta-mode=%s\n", hostname,
+                hostnameConfigured ? "yes" : "no", stationModeStarted ? "yes" : "no");
   WiFi.begin(wifiSsid.c_str(), wifiPassword.c_str());
   const uint32_t startedAt = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startedAt < 15000) {
@@ -1628,7 +1862,7 @@ void setup() {
     snprintf(bridgeId, sizeof(bridgeId), "%06x", macSuffix);
   }
 #endif
-  snprintf(hostname, sizeof(hostname), "cc1101-%s", bridgeId);
+  snprintf(hostname, sizeof(hostname), "esp32-cc1101-%s", bridgeId);
   logEvent("Bridge started: " + String(hostname));
   pinMode(PIN_CC_CS, OUTPUT);
   digitalWrite(PIN_CC_CS, HIGH);

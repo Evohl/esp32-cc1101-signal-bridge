@@ -12,3 +12,4 @@ secrets.yaml
 secrets.yml
 credentials.h
 config.local.h
+configs/cc1101-signals.json

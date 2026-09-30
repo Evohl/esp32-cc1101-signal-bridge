@@ -25,7 +25,7 @@ Install PlatformIO, connect the ESP32 over USB, then build and flash:
 pio run -e cc1101 -t upload
 ```
 
-On first start without saved Wi-Fi settings, the bridge creates the `CC1101-Setup` access point. Connect using its documented setup password, then open `http://192.168.4.1/` and enter the Wi-Fi settings. MQTT settings are optional. After the bridge joins Wi-Fi, open `http://cc1101-<mac-suffix>.local/` or use its DHCP address. The lowercase hostname suffix is derived from the ESP32 MAC address.
+On first start without saved Wi-Fi settings, the bridge creates the `CC1101-Setup` access point. Connect using its documented setup password, then open `http://192.168.4.1/` and enter the Wi-Fi settings. MQTT settings are optional. After the bridge joins Wi-Fi, open `http://esp32-cc1101-<mac-suffix>.local/` or use its DHCP address. The lowercase hostname suffix is derived from the ESP32 MAC address.
 
 ## Recording and replay
 
@@ -77,7 +77,7 @@ On the signal page, choose **Export JSON** to download `cc1101-signals.json`. On
 For USB uploads, use the `cc1101` environment. For ArduinoOTA, use the target's hostname or IP:
 
 ```sh
-pio run -e cc1101_ota -t upload --upload-port cc1101-<mac-suffix>.local
+pio run -e cc1101_ota -t upload --upload-port esp32-cc1101-<mac-suffix>.local
 ```
 
 The web interface also provides a firmware upload page at `/firmware` for a PlatformIO application `.bin` file.
