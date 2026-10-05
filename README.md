@@ -5,6 +5,7 @@ An ESP32-based recorder and replay bridge for raw OOK/ASK radio signals. Recordi
 ## Features
 
 - Capture and replay raw pulse timings with a CC1101 transceiver.
+- Adjust CC1101 transmit power with persistent low, standard, high, and maximum presets.
 - Name, inspect, edit, send, and delete recordings in the web interface.
 - Keep recordings across reboots using ESP32 NVS.
 - Export and import recordings as a portable JSON file.
@@ -25,7 +26,7 @@ Install PlatformIO, connect the ESP32 over USB, then build and flash:
 pio run -e cc1101 -t upload
 ```
 
-On first start without saved Wi-Fi settings, the bridge creates the `CC1101-Setup` access point. Connect using its documented setup password, then open `http://192.168.4.1/` and enter the Wi-Fi settings. MQTT settings are optional. After the bridge joins Wi-Fi, open `http://esp32-cc1101-<mac-suffix>.local/` or use its DHCP address. The lowercase hostname suffix is derived from the ESP32 MAC address.
+On first start without saved Wi-Fi settings, the bridge creates the `CC1101-Setup` access point. Connect using its documented setup password, then open `http://192.168.4.1/` and enter the Wi-Fi settings. MQTT settings are optional. The setup form also lets you enable one device password for the web interface and OTA; enabling it requires a password of at least eight characters. After the bridge joins Wi-Fi, open `http://esp32-cc1101-<mac-suffix>.local/` or use its DHCP address. The lowercase hostname suffix is derived from the ESP32 MAC address.
 
 ## Recording and replay
 
@@ -35,6 +36,8 @@ On first start without saved Wi-Fi settings, the bridge creates the `CC1101-Setu
 4. Use **Send** to replay a recording. Saved recordings remain in NVS after reboot.
 
 The bridge supports up to 48 recordings and up to 600 pulses per recording. Recordings are raw radio data, not decoded commands; results depend on the original protocol, receiver, antenna, and radio conditions.
+
+Set the global transmit-power preset under **Network / MQTT → Radio transmission**. The presets are approximately -10, 0, +5, and +10 dBm at 433 MHz; actual conducted power varies by frequency band and module. Antenna gain affects radiated power, so check the local limits for the band in use. Increasing transmit power does not increase range linearly.
 
 The signal manager includes the `office`, `livingroom`, `bedroom`, and `unassigned` zones. Create up to 16 zones with the **Create zone** form; saved zones remain available after reboot and appear in the signal forms. The zone list shows how many signals each zone contains. A zone can only be deleted when empty; delete its signals first. Signals are never moved automatically to `unassigned`.
 
@@ -80,8 +83,16 @@ For USB uploads, use the `cc1101` environment. For ArduinoOTA, use the target's 
 pio run -e cc1101_ota -t upload --upload-port esp32-cc1101-<mac-suffix>.local
 ```
 
+When password protection is enabled, set `OTA_PASSWORD` to the device password
+once in the shell environment and use `cc1101_ota_auth` instead:
+
+```sh
+export OTA_PASSWORD='<device password>'
+pio run -e cc1101_ota_auth -t upload --upload-port esp32-cc1101-<mac-suffix>.local
+```
+
 The web interface also provides a firmware upload page at `/firmware` for a PlatformIO application `.bin` file.
 
 ## Security
 
-The web interface has no authentication, including its settings and firmware upload pages. Use it only on a trusted, isolated local network; do not expose it directly to the internet. The setup access-point password is a firmware default and is not a substitute for network security.
+When password protection is enabled, the browser uses its built-in HTTP Basic Authentication prompt. The password can be changed or protection disabled under **System**; changes take effect after restart. The same password protects ArduinoOTA and web firmware uploads. With protection disabled, those interfaces are open to the local network. Basic Authentication over this firmware's plain HTTP connection is not encrypted, so it protects against casual access but not password sniffing; do not expose the device directly to the internet. The setup access-point password is a firmware default and is not a substitute for network security.

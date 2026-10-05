@@ -29,8 +29,11 @@ constexpr uint8_t MAX_ZONES = 16;
 constexpr uint8_t MAX_LOG_ENTRIES = 30;
 constexpr uint8_t MAX_CAPTURE_HISTORY = 2;
 constexpr uint32_t MQTT_BUFFER_SIZE = 768;
+constexpr uint32_t WIFI_RESET_TIMEOUT_MS = 5UL * 60UL * 1000UL;
 constexpr uint32_t CAPTURE_CARRIER_HOLD_US = 20000;
 constexpr uint8_t DEFAULT_LNA_GAIN_REDUCTION_STEP = 3;
+constexpr uint8_t TX_POWER_PA_TABLE_VALUES[] = {0x34, 0x60, 0x84, 0xC0};
+constexpr uint8_t DEFAULT_TX_POWER_PRESET = 1;
 char hostname[32];
 char bridgeId[7];
 constexpr char AP_NAME[] = "CC1101-Setup";
@@ -115,14 +118,18 @@ String mqttHost;
 String mqttUser;
 String mqttPassword;
 String mqttBase;
+String authPassword;
 uint16_t mqttPort = 1883;
+bool authRequired = false;
 bool webStarted = false;
 bool otaStarted = false;
+bool firmwareUploadUnauthorized = false;
 bool wifiHostnameSet = false;
 bool mdnsStarted = false;
 uint32_t lastMqttAttempt = 0;
 int lastMqttFailureState = -1;
 float activeFrequencyMHz = 433.92f;
+uint8_t txPowerPreset = DEFAULT_TX_POWER_PRESET;
 String lastAction = "Ready";
 bool cc1101Detected = false;
 uint8_t cc1101PartNumber = 0xFF;
@@ -130,6 +137,53 @@ uint8_t cc1101Version = 0xFF;
 LogEntry eventLog[MAX_LOG_ENTRIES]{};
 uint8_t eventLogNext = 0;
 uint8_t eventLogCount = 0;
+RTC_DATA_ATTR bool wifiResetIssuedThisOutage = false;
+uint32_t wifiDisconnectedSince = 0;
+bool wifiDisconnectTimerStarted = false;
+
+void wifiRecoveryWatchdogTick(bool wifiConfigured) {
+  if (!wifiConfigured) {
+    wifiDisconnectedSince = 0;
+    wifiDisconnectTimerStarted = false;
+    wifiResetIssuedThisOutage = false;
+    return;
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiDisconnectedSince = 0;
+    wifiDisconnectTimerStarted = false;
+    wifiResetIssuedThisOutage = false;
+    return;
+  }
+  if (wifiResetIssuedThisOutage) return;
+  if (!wifiDisconnectTimerStarted) {
+    wifiDisconnectedSince = millis();
+    wifiDisconnectTimerStarted = true;
+    return;
+  }
+  if (millis() - wifiDisconnectedSince >= WIFI_RESET_TIMEOUT_MS) {
+    wifiResetIssuedThisOutage = true;
+    Serial.println("Wi-Fi unavailable for 5 minutes; restarting once to recover");
+    delay(100);
+    ESP.restart();
+  }
+}
+
+bool authorizeWebRequest() {
+  if (!authRequired) return true;
+  if (authPassword.isEmpty()) {
+    webServer.send(503, "text/plain; charset=utf-8", "Authentication is enabled but no password is configured.");
+    return false;
+  }
+  if (webServer.authenticate("cc1101", authPassword.c_str())) return true;
+  webServer.requestAuthentication(BASIC_AUTH, "CC1101");
+  return false;
+}
+
+WebServer::THandlerFunction protectedHandler(WebServer::THandlerFunction handler) {
+  return [handler]() {
+    if (authorizeWebRequest()) handler();
+  };
+}
 
 volatile uint32_t captureLastEdgeUs = 0;
 volatile uint32_t captureLastCarrierUs = 0;
@@ -231,12 +285,12 @@ bool isKnownCc1101Version(uint8_t version) {
   return version == 0x04 || version == 0x14 || version == 0x17 || version == 0x03;
 }
 
-void ccSetConservativeOokPower() {
+void ccSetOokTransmitPower() {
   SPI.beginTransaction(SPISettings(4000000, MSBFIRST, SPI_MODE0));
   ccSelect();
   SPI.transfer(CC_PATABLE_BURST);
   SPI.transfer(0x00);
-  SPI.transfer(0x60);
+  SPI.transfer(TX_POWER_PA_TABLE_VALUES[txPowerPreset]);
   ccDeselect();
   SPI.endTransaction();
 }
@@ -278,7 +332,7 @@ void ccConfigure(float frequencyMHz, bool receive) {
   ccWriteRegister(CC_TEST2, 0x81);
   ccWriteRegister(CC_TEST1, 0x35);
   ccWriteRegister(CC_TEST0, 0x09);
-  ccSetConservativeOokPower();
+  ccSetOokTransmitPower();
 
   if (receive) {
     pinMode(PIN_CC_GDO0, INPUT);
@@ -777,6 +831,10 @@ String pageStart(const String& title) {
     ".setup-form{max-width:680px}.setup-section{padding:14px 0;border-bottom:1px solid #394952}"
     ".setup-section h2{font-size:1.1em;margin:0 0 12px}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:12px 16px}"
     ".form-grid label{display:flex;flex-direction:column;gap:5px;color:#a7b5bc;font-size:.92em}"
+    ".security-form{display:grid;gap:10px;max-width:680px}"
+    ".security-form .checkbox-label{display:flex;align-items:center;gap:8px}"
+    ".security-form .checkbox-label input{margin:0;padding:0;min-height:0;flex-shrink:0}"
+    ".security-form .password-label{display:flex;flex-direction:column;gap:5px;color:#a7b5bc;font-size:.92em}"
     ".form-grid input:not([type=range]):not([type=hidden]):not([type=file]),.form-grid select{width:100%;margin:0}"
     ".zone-list{list-style:none;padding:0;margin:0 0 12px;max-width:680px}"
     ".zone-list li{display:flex;align-items:center;justify-content:space-between;gap:16px;"
@@ -848,6 +906,24 @@ String settingsForm(bool firstSetup) {
   const String wifiName = firstSetup ? "" : htmlEscape(wifiSsid);
   const String wifiPasswordHint = firstSetup ? "" : " placeholder='blank = unchanged'";
   const String mqttPasswordHint = firstSetup ? "" : " placeholder='blank = unchanged'";
+  const String authSection = firstSetup
+    ? "<section class='setup-section'><h2>Web and OTA access</h2><div class='form-grid'>"
+      "<label><input type='checkbox' name='auth_required' value='true' id='auth-required'> Require password</label>"
+      "<label>Device password<input type='password' name='auth_password' id='auth-password' minlength='8' autocomplete='new-password'></label>"
+      "</div><p class='muted'>Leave password protection off for open access. If enabled, a password is required for the web interface and OTA.</p>"
+      "<script>const authToggle=document.getElementById('auth-required');const authPassword=document.getElementById('auth-password');"
+      "authToggle.addEventListener('change',()=>{authPassword.required=authToggle.checked;});</script></section>"
+    : "";
+  const String radioSection = firstSetup
+    ? ""
+    : "<section class='setup-section'><h2>Radio transmission</h2><div class='form-grid'><label>Transmit power"
+      "<select name='tx_power' required>"
+      "<option value='0'" + String(txPowerPreset == 0 ? " selected" : "") + ">Low (about -10 dBm at 433 MHz)</option>"
+      "<option value='1'" + String(txPowerPreset == 1 ? " selected" : "") + ">Standard (about 0 dBm at 433 MHz)</option>"
+      "<option value='2'" + String(txPowerPreset == 2 ? " selected" : "") + ">High (about +5 dBm at 433 MHz)</option>"
+      "<option value='3'" + String(txPowerPreset == 3 ? " selected" : "") + ">Maximum (about +10 dBm at 433 MHz)</option>"
+      "</select></label></div><p class='muted'>Approximate conducted output; actual power depends on frequency band and module. "
+      "Maximum power may exceed local limits depending on the antenna. Range does not increase linearly with transmit power.</p></section>";
   return intro +
     "<form class='setup-form' method='post' action='/settings'>"
     "<section class='setup-section'><h2>Wi-Fi</h2><div class='form-grid'>"
@@ -858,7 +934,7 @@ String settingsForm(bool firstSetup) {
     "<label>Port<input type='number' name='mqtt_port' min='1' max='65535' value='" + String(mqttPort) + "'></label>"
     "<label>Username<input name='mqtt_user' value='" + htmlEscape(mqttUser) + "' autocomplete='off'></label>"
     "<label>MQTT password<input type='password' name='mqtt_password'" + mqttPasswordHint + " autocomplete='new-password'></label>"
-    "</div></section><div class='form-actions'><button>" +
+    "</div></section>" + radioSection + authSection + "<div class='form-actions'><button>" +
     String(firstSetup ? "Save and connect" : "Save and restart") +
     "</button></div></form>" +
     (firstSetup ? "" : "<p class='muted'>Leave password fields blank to keep the saved passwords.</p>");
@@ -1655,6 +1731,27 @@ void handleApiPulses() {
 }
 
 void handleSettings() {
+  uint8_t requestedTxPowerPreset = txPowerPreset;
+  if (webServer.hasArg("tx_power")) {
+    const String txPowerValue = webServer.arg("tx_power");
+    if (txPowerValue.length() != 1 || txPowerValue[0] < '0' || txPowerValue[0] > '3') {
+      webServer.send(400, "text/plain; charset=utf-8", "Invalid transmit power preset.");
+      return;
+    }
+    requestedTxPowerPreset = (uint8_t)(txPowerValue[0] - '0');
+  }
+  if (wifiSsid.isEmpty()) {
+    const bool requestedAuth = webServer.arg("auth_required") == "true";
+    const String requestedPassword = webServer.arg("auth_password");
+    if (requestedAuth && requestedPassword.length() < 8) {
+      webServer.send(400, "text/plain; charset=utf-8", "Enter a device password with at least 8 characters, or leave password protection disabled.");
+      return;
+    }
+    authRequired = requestedAuth;
+    authPassword = requestedAuth ? requestedPassword : "";
+    preferences.putBool("auth_required", authRequired);
+    preferences.putString("auth_pass", authPassword);
+  }
   if (webServer.hasArg("ssid")) {
     const String newSsid = webServer.arg("ssid");
     const String newWifiPassword = webServer.arg("wifi_password");
@@ -1671,9 +1768,40 @@ void handleSettings() {
       preferences.putString("mpass", webServer.arg("mqtt_password"));
     }
   }
+  if (webServer.hasArg("tx_power")) {
+    if (preferences.putUChar("tx_power", requestedTxPowerPreset) != sizeof(requestedTxPowerPreset)) {
+      logEvent("Transmit power setting could not be saved");
+      webServer.send(500, "text/plain; charset=utf-8", "Could not save transmit power setting.");
+      return;
+    }
+    txPowerPreset = requestedTxPowerPreset;
+  }
   webServer.send(200, "text/html; charset=utf-8", pageStart("Settings saved") +
     "<h1>Settings saved</h1><p>Restarting the bridge.</p>" + pageEnd());
   delay(800);
+  ESP.restart();
+}
+
+void handleSecuritySettings() {
+  const bool requestedAuth = webServer.arg("auth_required") == "true";
+  const String requestedPassword = webServer.arg("auth_password");
+  if (requestedAuth && !requestedPassword.isEmpty() && requestedPassword.length() < 8) {
+    webServer.send(400, "text/plain; charset=utf-8", "Use at least 8 characters for the device password.");
+    return;
+  }
+  if (requestedAuth && authPassword.isEmpty() && requestedPassword.length() < 8) {
+    webServer.send(400, "text/plain; charset=utf-8", "Enter a password before enabling authentication.");
+    return;
+  }
+
+  authRequired = requestedAuth;
+  if (!authRequired) authPassword = "";
+  else if (!requestedPassword.isEmpty()) authPassword = requestedPassword;
+  preferences.putBool("auth_required", authRequired);
+  preferences.putString("auth_pass", authPassword);
+  webServer.send(200, "text/html; charset=utf-8", pageStart("Security saved") +
+    "<h1>Security settings saved</h1><p>Restarting bridge.</p>" + pageEnd());
+  delay(500);
   ESP.restart();
 }
 
@@ -1714,6 +1842,12 @@ void handleSystemPage() {
     String(ESP.getFreeSketchSpace() / 1024) + " KiB</p></section>"
     "<section class='panel'><h2>CC1101</h2><p>Status: " + ccStatus + "</p><p>Part number: " +
     ccPart + " · Version: " + ccVersion + "</p></section>"
+    "<section class='panel'><h2>Web and OTA access</h2><p>Password protection: " +
+    String(authRequired ? "Enabled" : "Disabled") + "</p><form method='post' action='/security' class='security-form'>"
+    "<label class='checkbox-label'><input type='checkbox' name='auth_required' value='true'" + String(authRequired ? " checked" : "") +
+    "> Require password for web and OTA</label><label class='password-label'>New device password (leave blank to keep current) "
+    "<input type='password' name='auth_password' minlength='8' autocomplete='new-password'></label> "
+    "<button>Save security settings</button></form></section>"
     "<section class='panel'><h2>Restart</h2><form method='post' action='/restart'>"
     "<button>Restart bridge</button></form></section>"
     "<section class='panel'><h2>Factory reset</h2><p>This erases Wi-Fi and MQTT settings, zones, and every saved signal.</p>"
@@ -1748,6 +1882,12 @@ void handleFactoryReset() {
 
 void handleFirmwareUpload() {
   HTTPUpload& upload = webServer.upload();
+  if (upload.status == UPLOAD_FILE_START) firmwareUploadUnauthorized = false;
+  if (authRequired && (authPassword.isEmpty() ||
+      !webServer.authenticate("cc1101", authPassword.c_str()))) {
+    firmwareUploadUnauthorized = true;
+    return;
+  }
   if (upload.status == UPLOAD_FILE_START) {
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
   } else if (upload.status == UPLOAD_FILE_WRITE) {
@@ -1758,6 +1898,11 @@ void handleFirmwareUpload() {
 }
 
 void handleFirmwareDone() {
+  if (firmwareUploadUnauthorized) {
+    firmwareUploadUnauthorized = false;
+    authorizeWebRequest();
+    return;
+  }
   const bool success = !Update.hasError();
   webServer.send(success ? 200 : 500, "text/plain", success ? "Update successful. Restarting." : "Firmware update failed.");
   if (success) {
@@ -1770,42 +1915,48 @@ void startWebServer() {
   if (webStarted) return;
   const char* requestHeaders[] = {"X-Requested-With"};
   webServer.collectHeaders(requestHeaders, 1);
-  webServer.on("/", HTTP_GET, handleRoot);
-  webServer.on("/signals", HTTP_GET, handleSignalsPage);
-  webServer.on("/log", HTTP_GET, handleLogPage);
-  webServer.on("/zones", HTTP_GET, handleZonesPage);
-  webServer.on("/backup", HTTP_GET, handleBackupPage);
-  webServer.on("/signals/export", HTTP_GET, handleSignalsExport);
-  webServer.on("/signal/import", HTTP_POST, handleSignalImport);
-  webServer.on("/api/status", HTTP_GET, handleApiStatus);
-  webServer.on("/api/log", HTTP_GET, handleApiLog);
-  webServer.on("/api/pulses", HTTP_GET, handleApiPulses);
-  webServer.on("/zone/create", HTTP_POST, handleZoneCreate);
-  webServer.on("/zone/delete", HTTP_POST, handleZoneDelete);
-  webServer.on("/capture/start", HTTP_POST, handleCaptureStart);
-  webServer.on("/capture/save", HTTP_POST, handleCaptureSave);
-  webServer.on("/send", HTTP_POST, handleSend);
-  webServer.on("/signal", HTTP_GET, handleSignalEditor);
-  webServer.on("/signal/save", HTTP_POST, handleSignalSave);
-  webServer.on("/delete", HTTP_POST, handleDelete);
-  webServer.on("/settings", HTTP_GET, handleSettingsPage);
-  webServer.on("/settings", HTTP_POST, handleSettings);
-  webServer.on("/firmware", HTTP_GET, handleFirmwarePage);
-  webServer.on("/firmware", HTTP_POST, handleFirmwareDone, handleFirmwareUpload);
-  webServer.on("/system", HTTP_GET, handleSystemPage);
-  webServer.on("/restart", HTTP_GET, []() {
+  webServer.on("/", HTTP_GET, protectedHandler(handleRoot));
+  webServer.on("/signals", HTTP_GET, protectedHandler(handleSignalsPage));
+  webServer.on("/log", HTTP_GET, protectedHandler(handleLogPage));
+  webServer.on("/zones", HTTP_GET, protectedHandler(handleZonesPage));
+  webServer.on("/backup", HTTP_GET, protectedHandler(handleBackupPage));
+  webServer.on("/signals/export", HTTP_GET, protectedHandler(handleSignalsExport));
+  webServer.on("/signal/import", HTTP_POST, protectedHandler(handleSignalImport));
+  webServer.on("/api/status", HTTP_GET, protectedHandler(handleApiStatus));
+  webServer.on("/api/log", HTTP_GET, protectedHandler(handleApiLog));
+  webServer.on("/api/pulses", HTTP_GET, protectedHandler(handleApiPulses));
+  webServer.on("/zone/create", HTTP_POST, protectedHandler(handleZoneCreate));
+  webServer.on("/zone/delete", HTTP_POST, protectedHandler(handleZoneDelete));
+  webServer.on("/capture/start", HTTP_POST, protectedHandler(handleCaptureStart));
+  webServer.on("/capture/save", HTTP_POST, protectedHandler(handleCaptureSave));
+  webServer.on("/send", HTTP_POST, protectedHandler(handleSend));
+  webServer.on("/signal", HTTP_GET, protectedHandler(handleSignalEditor));
+  webServer.on("/signal/save", HTTP_POST, protectedHandler(handleSignalSave));
+  webServer.on("/delete", HTTP_POST, protectedHandler(handleDelete));
+  webServer.on("/settings", HTTP_GET, protectedHandler(handleSettingsPage));
+  webServer.on("/settings", HTTP_POST, protectedHandler(handleSettings));
+  webServer.on("/security", HTTP_POST, protectedHandler(handleSecuritySettings));
+  webServer.on("/firmware", HTTP_GET, protectedHandler(handleFirmwarePage));
+  webServer.on("/firmware", HTTP_POST, protectedHandler(handleFirmwareDone), handleFirmwareUpload);
+  webServer.on("/system", HTTP_GET, protectedHandler(handleSystemPage));
+  webServer.on("/restart", HTTP_GET, protectedHandler([]() {
     webServer.sendHeader("Location", "/system");
     webServer.send(303);
-  });
-  webServer.on("/restart", HTTP_POST, handleRestart);
-  webServer.on("/factory-reset", HTTP_POST, handleFactoryReset);
+  }));
+  webServer.on("/restart", HTTP_POST, protectedHandler(handleRestart));
+  webServer.on("/factory-reset", HTTP_POST, protectedHandler(handleFactoryReset));
   webServer.begin();
   webStarted = true;
 }
 
 void startOta() {
   if (otaStarted || WiFi.status() != WL_CONNECTED) return;
+  if (authRequired && authPassword.isEmpty()) {
+    logEvent("OTA disabled: authentication is enabled without a password");
+    return;
+  }
   ArduinoOTA.setHostname(hostname);
+  if (authRequired) ArduinoOTA.setPassword(authPassword.c_str());
   ArduinoOTA.begin();
   mdnsStarted = MDNS.begin(hostname);
   if (mdnsStarted) MDNS.addService("http", "tcp", 80);
@@ -1825,6 +1976,7 @@ void connectWifi() {
   }
   const bool hostnameConfigured = WiFi.setHostname(hostname);
   const bool stationModeStarted = WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
   wifiHostnameSet = hostnameConfigured && stationModeStarted;
   Serial.printf("[net] DHCP hostname=%s configured=%s sta-mode=%s\n", hostname,
                 hostnameConfigured ? "yes" : "no", stationModeStarted ? "yes" : "no");
@@ -1878,6 +2030,14 @@ void setup() {
   mqttUser = preferences.getString("muser", "");
   mqttPassword = preferences.getString("mpass", "");
   mqttBase = preferences.getString("mbase", String("cc1101/") + bridgeId);
+  authRequired = preferences.getBool("auth_required", false);
+  authPassword = preferences.getString("auth_pass", "");
+  const uint8_t savedTxPowerPreset = preferences.getUChar("tx_power", DEFAULT_TX_POWER_PRESET);
+  if (savedTxPowerPreset < sizeof(TX_POWER_PA_TABLE_VALUES)) {
+    txPowerPreset = savedTxPowerPreset;
+  } else {
+    logEvent("Invalid stored transmit power preset; using standard");
+  }
   loadSignals();
   loadZones();
 
@@ -1903,12 +2063,36 @@ void setup() {
 }
 
 void loop() {
-  if (WiFi.status() == WL_CONNECTED) {
+  static bool wasConnected = WiFi.status() == WL_CONNECTED;
+  static uint32_t lastWifiReconnectAttempt = 0;
+  wifiRecoveryWatchdogTick(!wifiSsid.isEmpty());
+  const bool connected = WiFi.status() == WL_CONNECTED;
+  if (connected) {
+    if (!wasConnected) {
+      logEvent("Wi-Fi reconnected: " + WiFi.localIP().toString());
+      startWebServer();
+      startOta();
+    }
+    wasConnected = true;
     startWebServer();
     startOta();
     ArduinoOTA.handle();
     reconnectMqtt();
     mqttClient.loop();
+  } else {
+    if (wasConnected) {
+      ArduinoOTA.end();
+      if (mdnsStarted) MDNS.end();
+      otaStarted = false;
+      mdnsStarted = false;
+      logEvent("Wi-Fi disconnected; waiting for reconnect");
+    }
+    wasConnected = false;
+    if (!wifiSsid.isEmpty() && millis() - lastWifiReconnectAttempt >= 5000) {
+      lastWifiReconnectAttempt = millis();
+      WiFi.reconnect();
+      logEvent("Attempting Wi-Fi reconnect");
+    }
   }
   if (webStarted) webServer.handleClient();
   if (captureActive && (int32_t)(millis() - captureDeadline) >= 0) finishCapture();
