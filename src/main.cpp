@@ -910,7 +910,8 @@ String settingsForm(bool firstSetup) {
     ? "<section class='setup-section'><h2>Web and OTA access</h2><div class='form-grid'>"
       "<label><input type='checkbox' name='auth_required' value='true' id='auth-required'> Require password</label>"
       "<label>Device password<input type='password' name='auth_password' id='auth-password' minlength='8' autocomplete='new-password'></label>"
-      "</div><p class='muted'>Leave password protection off for open access. If enabled, a password is required for the web interface and OTA.</p>"
+      "</div><p class='muted'>Leave password protection off for open access. If enabled, sign in to the web interface with username "
+      "<code>cc1101</code> and the device password you set here. The same password protects OTA.</p>"
       "<script>const authToggle=document.getElementById('auth-required');const authPassword=document.getElementById('auth-password');"
       "authToggle.addEventListener('change',()=>{authPassword.required=authToggle.checked;});</script></section>"
     : "";
@@ -1843,7 +1844,9 @@ void handleSystemPage() {
     "<section class='panel'><h2>CC1101</h2><p>Status: " + ccStatus + "</p><p>Part number: " +
     ccPart + " · Version: " + ccVersion + "</p></section>"
     "<section class='panel'><h2>Web and OTA access</h2><p>Password protection: " +
-    String(authRequired ? "Enabled" : "Disabled") + "</p><form method='post' action='/security' class='security-form'>"
+    String(authRequired ? "Enabled" : "Disabled") +
+    "</p><p class='muted'>Web interface username: <code>cc1101</code>. Use this with the device password to sign in.</p>"
+    "<form method='post' action='/security' class='security-form'>"
     "<label class='checkbox-label'><input type='checkbox' name='auth_required' value='true'" + String(authRequired ? " checked" : "") +
     "> Require password for web and OTA</label><label class='password-label'>New device password (leave blank to keep current) "
     "<input type='password' name='auth_password' minlength='8' autocomplete='new-password'></label> "
